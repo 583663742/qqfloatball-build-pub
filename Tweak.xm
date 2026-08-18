@@ -4,6 +4,24 @@
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
 
+// ── 网络抓包日志（写入 /var/jb/tmp/qqflog.txt）──
+static void qqlog(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/var/jb/tmp/qqflog.txt"];
+    if (!fh) {
+        [[NSFileManager defaultManager] createFileAtPath:@"/var/jb/tmp/qqflog.txt" contents:nil attributes:nil];
+        fh = [NSFileHandle fileHandleForWritingAtPath:@"/var/jb/tmp/qqflog.txt"];
+    }
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[[msg stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    }
+}
+
 // ── 提前声明 %new 方法，供 dispatch_once block 内调用 ──
 @interface UIApplication (QQFloatBall)
 - (void)_setupFloatBall;
@@ -58,6 +76,64 @@ static UIButton *_floatBall = nil;
 }
 
 @end
+
+// ──────────────────────────────────────────
+//  网络抓包：hook NSURLSession，记录所有请求到日志
+// ──────────────────────────────────────────
+%hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    @try {
+        NSString *url = request.URL.absoluteString ?: @"";
+        if ([url containsString:@"ti.qq.com"] || [url containsString:@"club.vip.qq.com"] ||
+            [url containsString:@"qqlevel"] || [url containsString:@"tianxuan"] ||
+            [url containsString:@"levelTask"] || [url containsString:@"trpc"]) {
+            qqlog(@"\n========== REQ ==========");
+            qqlog(@"URL: %@", url);
+            qqlog(@"METHOD: %@", request.HTTPMethod ?: @"GET");
+            NSDictionary *hdrs = request.allHTTPHeaderFields;
+            for (NSString *k in hdrs) {
+                qqlog(@"HDR %@: %@", k, hdrs[k]);
+            }
+            NSData *body = request.HTTPBody;
+            if (request.HTTPBodyStream) {
+                NSInputStream *stream = request.HTTPBodyStream;
+                [stream open];
+                NSMutableData *bd = [NSMutableData data];
+                uint8_t buf[4096];
+                NSInteger n;
+                while ((n = [stream read:buf maxLength:sizeof(buf)]) > 0) {
+                    [bd appendBytes:buf length:n];
+                }
+                [stream close];
+                body = bd;
+            }
+            if (body.length > 0) {
+                NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+                qqlog(@"BODY: %@", bodyStr ?: @"(non-utf8)");
+            }
+        }
+    } @catch (NSException *e) {
+        qqlog(@"log exception: %@", e);
+    }
+    return %orig(request, completionHandler);
+}
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    @try {
+        NSString *url = request.URL.absoluteString ?: @"";
+        if ([url containsString:@"ti.qq.com"] || [url containsString:@"club.vip.qq.com"] ||
+            [url containsString:@"qqlevel"] || [url containsString:@"tianxuan"] ||
+            [url containsString:@"levelTask"] || [url containsString:@"trpc"]) {
+            qqlog(@"\n========== REQ(no-completion) ==========");
+            qqlog(@"URL: %@", url);
+            qqlog(@"METHOD: %@", request.HTTPMethod ?: @"GET");
+        }
+    } @catch (NSException *e) {}
+    return %orig(request);
+}
+
+%end
 
 %hook UIApplication
 

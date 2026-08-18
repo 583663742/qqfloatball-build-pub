@@ -5,6 +5,20 @@
 // ── 持有悬浮球窗口和按钮的强引用，防止 ARC 释放 ──
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
+static UILabel *_logLabel = nil;        // 悬浮球旁的任务日志面板
+static NSMutableArray *_logLines = nil; // 最近日志行（UI 显示用）
+
+// ── UI 日志面板：主线程更新悬浮球旁的小黑条 ──
+static void qqlogUI(NSString *msg) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!_logLines) _logLines = [NSMutableArray array];
+        [_logLines addObject:msg];
+        if (_logLines.count > 6) [_logLines removeObjectAtIndex:0];
+        if (_logLabel) {
+            _logLabel.text = [_logLines componentsJoinedByString:@"\n"];
+        }
+    });
+}
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 static BOOL _captureEnabled = NO;
@@ -127,24 +141,35 @@ static void dumpWebKitCookies(void) {
     }
 }
 
-// ── WebView 自动领取脚本（注入式）──
+// ── WebView 自动领取脚本（注入式，返回诊断 JSON）──
 static NSString *autoClaimScript(void) {
     return @"(function(){"
-        "if(window._qqAutoClaimRunning)return;"
+        "var diag={url:location.href||'',host:location.host||'',path:location.pathname||''};"
+        "var inLevelPage=function(){"
+        "  var h=location.host||'';var p=location.pathname||'';"
+        "  if(h.indexOf('ti.qq.com')>=0&&p.indexOf('qqlevel')>=0)return true;"
+        "  if(h.indexOf('club.vip.qq.com')>=0&&p.indexOf('qqlevel')>=0)return true;"
+        "  if(p.indexOf('openKuikly')>=0&&diag.url.indexOf('qqlevel')>=0)return true;"
+        "  return false;"
+        "};"
+        "if(!inLevelPage()){"
+        "  diag.result='not_level_page';"
+        "  return JSON.stringify(diag);"
+        "}"
+        "if(window._qqAutoClaimRunning){diag.result='already_running';return JSON.stringify(diag);}"
         "window._qqAutoClaimRunning=true;"
         "var clicked=0,total=0;"
         "var log=function(msg){"
-        "  var d=document.createElement('div');"
-        "  d.style.cssText='position:fixed;bottom:10px;left:10px;z-index:999999;background:rgba(0,0,0,0.8);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;max-width:80%;word-break:break-all;';"
-        "  d.textContent='[自动任务] '+msg;"
-        "  document.body.appendChild(d);"
-        "  setTimeout(function(){d.remove()},3000);"
-        "};"
-        "var inTaskCenter=function(){"
-        "  return location.host.indexOf('ti.qq.com')>=0 && location.pathname.indexOf('qqlevel')>=0;"
+        "  try{"
+        "    var d=document.createElement('div');"
+        "    d.style.cssText='position:fixed;bottom:10px;left:10px;z-index:999999;background:rgba(0,0,0,0.8);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;max-width:80%;word-break:break-all;';"
+        "    d.textContent='[自动任务] '+msg;"
+        "    document.body.appendChild(d);"
+        "    setTimeout(function(){try{d.remove()}catch(e){}},3000);"
+        "  }catch(e){}"
         "};"
         "var findAndClick=function(){"
-        "  if(!inTaskCenter()){"
+        "  if(!inLevelPage()){"
         "    log('已离开等级页，停止自动任务');"
         "    clearInterval(window._qqAutoTimer);"
         "    return 0;"
@@ -182,13 +207,19 @@ static NSString *autoClaimScript(void) {
         "log('自动领取已启动，每2秒扫描一次');"
         "run();"
         "window._qqAutoTimer=setInterval(run,2000);"
+        "diag.result='started';diag.clicked=clicked;"
+        "return JSON.stringify(diag);"
         "})();";
 }
 
-// ── 检测 WebView 是否在等级页面──
+// ── 检测 WebView 是否在等级页面（task-center 或 Kuikly 任务页）──
 static BOOL isTaskCenterPage(NSString *url) {
     if (!url) return NO;
-    return [url containsString:@"ti.qq.com"] && [url containsString:@"qqlevel"];
+    // ti.qq.com/qqlevel 是原始等级页；club.vip.qq.com/openKuikly 是自动跳转后的 Kuikly 任务页
+    if ([url containsString:@"ti.qq.com"] && [url containsString:@"qqlevel"]) return YES;
+    if ([url containsString:@"club.vip.qq.com"] && [url containsString:@"qqlevel"]) return YES;
+    if ([url containsString:@"openKuikly"] && [url containsString:@"qqlevel"]) return YES;
+    return NO;
 }
 
 %hook WKWebView
@@ -204,20 +235,24 @@ static BOOL isTaskCenterPage(NSString *url) {
             [url containsString:@"tianxuan"])) {
             dumpWebKitCookies();
         }
-        // 自动注入领取脚本：等级页面加载时延迟注入（weak 保护，防止 WebView 释放后悬垂崩溃）
+        // 自动注入领取脚本：等级页面加载后延迟注入（等自动跳转 Kuikly 完成；weak 防悬垂）
         if (isTaskCenterPage(url)) {
             __weak WKWebView *weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 WKWebView *strongSelf = weakSelf;
                 if (!strongSelf) return;
                 [strongSelf evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
                     if (error) {
                         qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
+                        qqlogUI([NSString stringWithFormat:@"注入失败: %@", error.localizedDescription]);
                     } else {
-                        qqlog(@"[autoClaim] 已注入自动领取脚本");
+                        qqlog(@"[autoClaim] 注入结果: %@", result ?: @"(nil)");
+                        qqlogUI([NSString stringWithFormat:@"自动任务: %@", result ?: @""]);
                     }
                 }];
             });
+            qqlogUI(@"正在打开等级页…");
+            _logLabel.hidden = NO;
         }
     } @catch (NSException *e) {}
     return %orig(request);
@@ -456,6 +491,20 @@ static void dumpKeyClassMethods(void) {
     [ball addGestureRecognizer:pan];
 
     [floatWindow addSubview:ball];
+
+    // ── 任务日志面板（悬浮球下方小黑条，实时显示任务进度）──
+    UILabel *logLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, screenBounds.size.height - 140, screenBounds.size.width - 16, 120)];
+    logLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+    logLabel.textColor = [UIColor whiteColor];
+    logLabel.font = [UIFont systemFontOfSize:11];
+    logLabel.numberOfLines = 0;
+    logLabel.textAlignment = NSTextAlignmentLeft;
+    logLabel.layer.cornerRadius = 8;
+    logLabel.layer.masksToBounds = YES;
+    logLabel.hidden = YES;  // 默认隐藏，做任务时显示
+    _logLabel = logLabel;
+    [floatWindow addSubview:logLabel];
+
     floatWindow.hidden = NO;
 }
 

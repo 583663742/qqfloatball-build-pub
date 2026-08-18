@@ -255,12 +255,12 @@ static BOOL shouldBlockNav(NSString *url) {
     return NO;
 }
 
-%hook WKWebView
-
-// 声明接口让编译器可见（%new 实现只在 runtime 添加，编译期需要 category 声明）
+// 声明接口让编译器可见（%new 实现只在 runtime 添加，编译期需要 category 声明；必须放 %hook 块外）
 @interface WKWebView (QQFBAutoClaim)
 - (void)injectAutoClaimWithRetry:(WKWebView *)weakSelf attempt:(int)attempt;
 @end
+
+%hook WKWebView
 
 // 自动注入领奖脚本：延迟后注入，页面未就绪（about:blank/加载中）则重试
 // Qsped 模拟器方案：页面停留网页版后，页面内 JS 同源 fetch TRPC（levelTask/Get + ExecAct），

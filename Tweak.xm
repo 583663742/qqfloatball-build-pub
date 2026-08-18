@@ -224,6 +224,25 @@ static void dumpPSKeys(void) {
     }
 }
 
+// ── hook Kuikly 请求模型：抓等级页真实请求 URL/cmd（只读日志）──
+%hook QQKuiklyHTTPRequestItem
+- (void)setUrl:(NSString *)url {
+    if (_captureEnabled) {
+        qqlog(@"[kuikly] HTTPRequest url=%@ domain=%@", url, [self valueForKey:@"domain"] ?: @"");
+    }
+    %orig;
+}
+%end
+
+%hook QQKuiklySSORequestItem
+- (void)setCmd:(NSString *)cmd {
+    if (_captureEnabled) {
+        qqlog(@"[kuikly] SSORequest cmd=%@", cmd);
+    }
+    %orig;
+}
+%end
+
 // ── 一键做任务：Get 列表 → 领奖可领取的 → 自动完成可做的 ──
 static void runLevelTasks(void) {
     @try {

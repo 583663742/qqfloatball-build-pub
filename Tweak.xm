@@ -23,6 +23,8 @@ static void qqlogUI(NSString *msg) {
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 static BOOL _captureEnabled = NO;
+// ── 一键任务停止标记：YES=停止当前任务循环；NO=继续 ──
+static BOOL _autoStop = NO;
 // 标记当前 QQWebViewController 是否停留在等级任务中心页（用于拦截清空/跳走）
 static BOOL _inTaskCenter = NO;
 // 记录当前任务中心对应的 WKWebView（弱引用指针值，用关联对象更稳妥）
@@ -115,7 +117,37 @@ static void qqlog(NSString *fmt, ...) {
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     @try {
         if (_captureEnabled) {
-            qqlog(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"");
+            NSString *url = request.URL.absoluteString ?: @"";
+            // 只记录等级相关域，避免日志被 QQ 其他请求刷爆
+            BOOL relevant = ([url containsString:@"ti.qq.com"]
+                          || [url containsString:@"qqlevel"]
+                          || [url containsString:@"tianxuan"]
+                          || [url containsString:@"openKuikly"]
+                          || [url containsString:@"club.vip.qq.com"]
+                          || [url containsString:@"h5.vip.qq.com"]);
+            if (relevant) {
+                NSString *body = @"";
+                if (request.HTTPBody.length > 0) {
+                    body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+                    if (!body) body = [request.HTTPBody description];
+                    if (body.length > 500) body = [body substringToIndex:500];
+                }
+                qqlog(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url, body);
+                // 记录响应（异步包装）
+                void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+                    @try {
+                        if (data.length > 0) {
+                            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                            if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
+                            qqlog(@"[NSURLSession]  ← RESP %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, respStr);
+                        } else if (err) {
+                            qqlog(@"[NSURLSession]  ← ERR %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, err.localizedDescription);
+                        }
+                    } @catch (NSException *e) {}
+                    if (completionHandler) completionHandler(data, resp, err);
+                };
+                return %orig(request, wrapped);
+            }
         }
     } @catch (NSException *e) {}
     return %orig(request, completionHandler);
@@ -526,7 +558,7 @@ static BOOL shouldBlockNav(NSString *url) {
     });
 }
 
-// ── 核心拦截：loadRequest ──
+// ── 核心拦截：loadRequest（阶段2：放行 Kuikly，不再拦截跳转）──
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
     @try {
         NSString *url = request.URL.absoluteString ?: @"";
@@ -535,58 +567,32 @@ static BOOL shouldBlockNav(NSString *url) {
             qqlog(@"[WKWebView] loadRequest (tracked=%d): %@", tracked, url);
         }
 
-        // ── 拦截跳转：Kuikly/mqqapi/其他离开等级页的跳转 ──
-        if (shouldBlockNav(url)) {
-            qqlog(@"[WKWebView] 拦截跳转: %@", url);
-            // 不直接 return nil：QQ 内部可能因 nil 导航而状态错乱；改为允许 orig 后立即恢复
-            // 但先尝试直接 return nil，若 QQ 有意见再换策略
-            if (tracked) {
-                // 追踪中的 webview：立即触发恢复，不调用 orig
-                [self _qqfb_restoreIfCleared];
-                return nil;
-            }
-        }
+        // ── 阶段2：放行所有跳转（Kuikly 正常渲染等级页）──
+        // 等级页 = Kuikly 原生渲染，拦截会导致白屏。让 QQ 自由导航，
+        // 我们只做追踪标记 + 抓包观察。
 
-        // ── 拦截 about:blank / 空 URL 清空 ──
-        BOOL isBlank = (url.length == 0
-                        || [url isEqualToString:@"about:blank"]
-                        || [url isEqualToString:@"about:blank#"]
-                        || [url hasPrefix:@"about:blank?"]);
-        if (isBlank && tracked) {
-            qqlog(@"[WKWebView] 拦截about:blank清空 -> 恢复任务页");
-            // 只在追踪中拦截，避免影响 QQ 其他 webview 的正常空白页
-            [self _qqfb_restoreIfCleared];
-            return nil;
-        }
-
-        // ── 正常请求 → 如果是任务页，打标、记 good URL、启动注入 ──
-        if (isTaskCenterPage(url)) {
+        // ── 正常请求 → 如果是任务页/Kuikly 等级页，打标追踪 ──
+        BOOL isLevel = isTaskCenterPage(url)
+                    || [url containsString:@"qqlevel"]
+                    || ([url containsString:@"openKuikly"] && [url containsString:@"qqlevel"])
+                    || ([url containsString:@"openKuikly"] && [url containsString:@"vas_qqvip_account_info_host"]);
+        if (isLevel) {
             [self _qqfb_setTracked:YES];
             [self _qqfb_setLastGoodURL:url];
             _inTaskCenter = YES;
-            // 只有当前没有注入链在跑时，才启动新的一条（恢复后的 loadRequest 不会重复启动）
-            if (![self _qqfb_injectRunning]) {
-                __weak WKWebView *weakSelf = self;
-                [self injectAutoClaimWithRetry:weakSelf attempt:0];
-            } else {
-                qqlog(@"[WKWebView] 已有注入链运行，本次 loadRequest 不重复启动");
-            }
             qqlogUI(@"正在打开等级页…");
             if (_logLabel) _logLabel.hidden = NO;
         } else if (tracked && url.length > 0 && ![url hasPrefix:@"about:"]) {
-            // 追踪中但跳走了非 blank 页面 → 如果是 qqlevel 域下，仍记 good URL；否则退出追踪
-            if ([url containsString:@"qqlevel"]) {
-                [self _qqfb_setLastGoodURL:url];
-            } else {
-                qqlog(@"[WKWebView] 离开任务页，取消追踪: %@", url.length > 120 ? [url substringToIndex:120] : url);
-                [self _qqfb_setTracked:NO];
-                _inTaskCenter = NO;
-            }
+            // 追踪中但跳走了 → 退出追踪（放行）
+            qqlog(@"[WKWebView] 离开等级页，取消追踪: %@", url.length > 120 ? [url substringToIndex:120] : url);
+            [self _qqfb_setTracked:NO];
+            _inTaskCenter = NO;
         }
 
         if (_captureEnabled && ([url containsString:@"ti.qq.com"] ||
             [url containsString:@"qqlevel"] ||
-            [url containsString:@"tianxuan"])) {
+            [url containsString:@"tianxuan"] ||
+            [url containsString:@"openKuikly"])) {
             dumpWebKitCookies();
         }
     } @catch (NSException *e) {
@@ -1161,8 +1167,17 @@ static void openTaskCenterWebView(void) {
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
         qqlog(@"[action] 一键做任务 -> 探测三件套 + 打开等级页");
+        _autoStop = NO;
         dumpPSKeys();
         openTaskCenterWebView();
+    }]];
+    // 停止任务（阶段2：置停止标记，任务循环检测到后立即停止）
+    [alert addAction:[UIAlertAction actionWithTitle:@"⏹ 停止任务"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *action) {
+        _autoStop = YES;
+        qqlog(@"[action] ⏹ 停止任务（标记已置位，任务循环将在下一轮检测到并停止）");
+        qqlogUI(@"已请求停止任务…");
     }]];
     // 手动兜底：方向③ —— 暴力解锁所有 WKWebView 的 injectRunning / Tracked 以及全局状态
     if (lockedCount > 0) {

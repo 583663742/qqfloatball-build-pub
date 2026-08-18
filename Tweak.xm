@@ -185,25 +185,30 @@ static void qqlogAsync(NSString *fmt, ...) {
                     if (body.length > 500) body = [body substringToIndex:500];
                 }
                 qqlogAsync(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url, body);
-                // 记录响应：先立即调原 handler（零延迟！），日志异步后台做
-                void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-                    if (completionHandler) completionHandler(data, resp, err);  // ← 立即放行，不阻塞页面
-                    NSString *u = [url copy];
-                    NSData *d = [data copy];
-                    NSError *e = err;
-                    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-                        @try {
-                            if (d.length > 0) {
-                                NSString *respStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-                                if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
-                                qqlogAsync(@"[NSURLSession]  ← RESP %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, respStr);
-                            } else if (e) {
-                                qqlogAsync(@"[NSURLSession]  ← ERR %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, e.localizedDescription);
-                            }
-                        } @catch (NSException *ex) {}
-                    });
-                };
-                return %orig(request, wrapped);
+                // 只有等级关键词请求才包装记录响应（数量少、零影响）
+                // 全量模式只记请求不碰响应 —— 包装 completionHandler 会导致 Kuikly 页面白屏（实测盲盒/打卡/漫剧/元宝）
+                // 且等级页本身是 Kuikly，全量模式下连 keyTask 也不包装，保证零干预
+                if (keyTask && _captureOnlyTasks) {
+                    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+                        if (completionHandler) completionHandler(data, resp, err);  // ← 立即放行，不阻塞页面
+                        NSString *u = [url copy];
+                        NSData *d = [data copy];
+                        NSError *e = err;
+                        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+                            @try {
+                                if (d.length > 0) {
+                                    NSString *respStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                                    if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
+                                    qqlogAsync(@"[NSURLSession]  ← RESP %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, respStr);
+                                } else if (e) {
+                                    qqlogAsync(@"[NSURLSession]  ← ERR %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, e.localizedDescription);
+                                }
+                            } @catch (NSException *ex) {}
+                        });
+                    };
+                    return %orig(request, wrapped);
+                }
+                return %orig(request, completionHandler);
             }
         }
     } @catch (NSException *e) {}

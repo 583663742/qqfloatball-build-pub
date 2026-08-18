@@ -158,7 +158,21 @@ static NSString *autoClaimScript(void) {
         "}"
         "if(window._qqAutoClaimRunning){diag.result='already_running';return JSON.stringify(diag);}"
         "window._qqAutoClaimRunning=true;"
-        "var clicked=0,total=0;"
+        "var api=function(path,data){"
+        "  var r=null;"
+        "  try{"
+        "    r=new XMLHttpRequest();"
+        "    r.open('POST','//'+location.host+path,false);"  // 同步同源请求，cookie 自动带
+        "    r.setRequestHeader('Content-Type','application/json');"
+        "    r.send(JSON.stringify(data));"
+        "    return r.status===200&&r.responseText?JSON.parse(r.responseText):null;"
+        "  }catch(e){diag.api_err=(diag.api_err||'')+e.message+';';return null;}"
+        "};"
+        // 1. 拉任务列表（模拟器 Qsped 方案：页面内 fetch TRPC，同源 cookie 无 -3000）
+        "var j=api('/qqlevel/trpc/levelTask/Get',{mode:42});"
+        "if(!j){diag.result='api_fail';return JSON.stringify(diag);}"
+        "var tasks=(j.response&&j.response.task_list)||j.task_list||[];"
+        "diag.total=tasks.length;diag.result='started';diag.clicked=0;"
         "var log=function(msg){"
         "  try{"
         "    var d=document.createElement('div');"
@@ -168,46 +182,47 @@ static NSString *autoClaimScript(void) {
         "    setTimeout(function(){try{d.remove()}catch(e){}},3000);"
         "  }catch(e){}"
         "};"
-        "var findAndClick=function(){"
-        "  if(!inLevelPage()){"
-        "    log('已离开等级页，停止自动任务');"
-        "    clearInterval(window._qqAutoTimer);"
-        "    return 0;"
+        "log('任务数: '+tasks.length);"
+        // 2. 诊断：记录每个任务状态
+        "diag.list=[];"
+        "for(var i=0;i<tasks.length;i++){"
+        "  var t=tasks[i];"
+        "  diag.list.push({id:t.task_id,st:t.status,btn:t.button_text||'',award:t.award_rule_id||'',title:(t.title||'').substring(0,12)});"
+        "}"
+        // 3. status=2 可领取 → ExecAct 领奖（同源 fetch TRPC，页面自身请求不会被拒）
+        "var claimed=0,errs=0;"
+        "for(var i=0;i<tasks.length;i++){"
+        "  var t=tasks[i];"
+        "  if(t.status===2&&t.award_rule_id){"
+        "    var req=JSON.stringify({sub_act_id:t.award_rule_id,task_id:t.unique_task_id||t.task_id,uid:(window.mqq&&mqq.user&&mqq.user.getUin?String(mqq.user.getUin()):''),business_task_id:t.business_task_id||''});"
+        "    var body={SubActId:t.award_rule_id,ClientPlat:'h5',Aid:'',EnteranceId:'',ActReqData:req};"
+        "    var rr=api('/qqlevel/tianxuan/trpc/access/ExecAct',body);"
+        "    if(rr&&rr.code===0){claimed++;log('已领奖: '+t.title);}"
+        "    else{errs++;log('领奖失败: '+t.title+' code='+(rr&&rr.code));}"
         "  }"
-        "  var btns=document.querySelectorAll('button,div,span,a,[class*=\"btn\"],[class*=\"button\"]');"
-        "  var c=0;"
-        "  for(var i=0;i<btns.length;i++){"
-        "    var el=btns[i];"
-        "    try{"
-        "      var txt=(el.textContent||el.innerText||'');"
-        "      if(txt.indexOf('领取')>=0||txt.indexOf('去完成')>=0||txt.indexOf('去做')>=0){"
-        "        el.click();c++;clicked++;"
-        "        log('点击: '+txt.trim()+' (第'+clicked+'个)');"
-        "        if(clicked>=3){"
-        "          log('已完成3个，停止扫描');"
-        "          clearInterval(window._qqAutoTimer);"
-        "          return c;"
-        "        }"
-        "      }"
-        "    }catch(e){}"
-        "  }"
-        "  return c;"
-        "};"
-        "var run=function(){"
+        "}"
+        "diag.claimed=claimed;diag.errs=errs;"
+        // 点击 status=0 待完成任务页面上的『去完成/去打卡/去添加』按钮
+        // iOS 任务全是 status=0（button_text: 去完成/去打卡/去添加），按钮在网页版 DOM 里
+        "var clicked=0;"
+        "var btnKeys=['去完成','去打卡','去添加','去领取','立即领取','领取'];"
+        "var all=document.querySelectorAll('button,div,span,a,[class*=\"btn\"],[class*=\"button\"],li');"
+        "for(var i=0;i<all.length;i++){"
+        "  var el=all[i];"
         "  try{"
-        "    var c=findAndClick();"
-        "    if(c===0&&clicked===0){"
-        "      log('未找到可领取任务，2秒后重试...');"
+        "    var txt=(el.textContent||el.innerText||'').trim();"
+        "    for(var k=0;k<btnKeys.length;k++){"
+        "      if(txt===btnKeys[k]||txt.indexOf(btnKeys[k])===0){"
+        "        el.click();clicked++;"
+        "        log('点击按钮: '+txt.substring(0,20));"
+        "        break;"
+        "      }"
         "    }"
-        "  }catch(e){"
-        "    log('脚本异常: '+e.message);"
-        "    clearInterval(window._qqAutoTimer);"
-        "  }"
-        "};"
-        "log('自动领取已启动，每2秒扫描一次');"
-        "run();"
-        "window._qqAutoTimer=setInterval(run,2000);"
-        "diag.result='started';diag.clicked=clicked;"
+        "  }catch(e){}"
+        "}"
+        "diag.clicked=clicked;"
+        "log('点击 '+clicked+' 个按钮');"
+        "diag.final='done';"
         "return JSON.stringify(diag);"
         "})();";
 }
@@ -222,7 +237,69 @@ static BOOL isTaskCenterPage(NSString *url) {
     return NO;
 }
 
+// 是否该拦截的跳转（模拟器 Qsped 方案：拦截一切离开 task-center 网页版的跳转）
+// 只放行 ti.qq.com/qqlevel 域 + ptlogin/check_sig 登录链；等级页相关跳转（Kuikly/mqqapi 深链）一律拦
+// ⚠️ 收窄条件：仅拦含 qqlevel 上下文的跳转，避免影响 QQ 其他 WebView 功能
+static BOOL shouldBlockNav(NSString *url) {
+    if (!url || url.length == 0) return NO;
+    // 登录链放行
+    if ([url containsString:@"ptlogin"] || [url containsString:@"check_sig"]) return NO;
+    // 等级页本身放行
+    if ([url containsString:@"ti.qq.com"] && [url containsString:@"qqlevel"]) return NO;
+    // Kuikly 任务页跳转（club.vip.qq.com/openKuikly + qqlevel 上下文）拦截
+    if ([url containsString:@"openKuikly"]) return YES;
+    // mqqapi:// 深链（含 qqlevel 上下文）拦截，防止页面跳走
+    if ([url hasPrefix:@"mqqapi://"] && [url containsString:@"qqlevel"]) return YES;
+    // 其他含 qqlevel 的跳转（如 qzone/vip 域任务落地页）拦截
+    if ([url containsString:@"qqlevel"]) return YES;
+    return NO;
+}
+
 %hook WKWebView
+
+// 自动注入领奖脚本：延迟后注入，页面未就绪（about:blank/加载中）则重试
+// Qsped 模拟器方案：页面停留网页版后，页面内 JS 同源 fetch TRPC（levelTask/Get + ExecAct），
+// cookie 自动带、无插件进程 -3000 死路
+%new
+- (void)injectAutoClaimWithRetry:(__weak WKWebView *)weakSelf attempt:(int)attempt {
+    if (attempt >= 5) {
+        qqlog(@"[autoClaim] 重试5次仍失败，放弃");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        WKWebView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        // 先查当前 URL 是否已就绪（页面停留网页版而非 about:blank）
+        [strongSelf evaluateJavaScript:@"location.href" completionHandler:^(id _Nullable r, NSError * _Nullable e) {
+            if (e || ![r isKindOfClass:[NSString class]] || [(NSString *)r length] == 0) {
+                qqlog(@"[autoClaim] 第%d次：页面未就绪，重试", attempt + 1);
+                [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
+                return;
+            }
+            NSString *cur = (NSString *)r;
+            if ([cur isEqualToString:@"about:blank"] || [cur hasPrefix:@"about:"]) {
+                qqlog(@"[autoClaim] 第%d次：about:blank，等待页面加载", attempt + 1);
+                [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
+                return;
+            }
+            [strongSelf evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
+                if (error) {
+                    qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
+                    qqlogUI([NSString stringWithFormat:@"注入失败: %@", error.localizedDescription]);
+                    [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
+                } else {
+                    NSString *res = result ?: @"";
+                    qqlog(@"[autoClaim] 注入结果: %@", res);
+                    qqlogUI([NSString stringWithFormat:@"自动任务: %@", res]);
+                    // 若脚本报 not_level_page（页面又跳走了），再重试
+                    if ([res containsString:@"not_level_page"] || [res containsString:@"api_fail"]) {
+                        [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
+                    }
+                }
+            }];
+        }];
+    });
+}
 
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
     @try {
@@ -230,27 +307,21 @@ static BOOL isTaskCenterPage(NSString *url) {
         if (_captureEnabled) {
             qqlog(@"[WKWebView] loadRequest: %@", url);
         }
+        // 拦截一切离开等级页的跳转（Qsped 方案）：Kuikly/mqqapi/其他域一律拦，页面停留网页版
+        if (shouldBlockNav(url)) {
+            qqlog(@"[WKWebView] 拦截跳转: %@", url);
+            return nil;
+        }
         if (_captureEnabled && ([url containsString:@"ti.qq.com"] ||
             [url containsString:@"qqlevel"] ||
             [url containsString:@"tianxuan"])) {
             dumpWebKitCookies();
         }
-        // 自动注入领取脚本：等级页面加载后延迟注入（已拦截 Kuikly 跳转，页面停留网页版；weak 防悬垂）
+        // 自动注入领取脚本：等级页面加载后延迟注入，失败（页面未就绪）则重试
+        // Qsped 方案：拦截 Kuikly 跳转 → 页面停留网页版 → 页面内 JS 同源 fetch TRPC 领奖
         if (isTaskCenterPage(url)) {
             __weak WKWebView *weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                WKWebView *strongSelf = weakSelf;
-                if (!strongSelf) return;
-                [strongSelf evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
-                    if (error) {
-                        qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
-                        qqlogUI([NSString stringWithFormat:@"注入失败: %@", error.localizedDescription]);
-                    } else {
-                        qqlog(@"[autoClaim] 注入结果: %@", result ?: @"(nil)");
-                        qqlogUI([NSString stringWithFormat:@"自动任务: %@", result ?: @""]);
-                    }
-                }];
-            });
+            [self injectAutoClaimWithRetry:weakSelf attempt:0];
             qqlogUI(@"正在打开等级页…");
             _logLabel.hidden = NO;
         }

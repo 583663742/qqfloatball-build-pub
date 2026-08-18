@@ -62,8 +62,21 @@ static void qqlogAsync(NSString *fmt, ...) {
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+    // 串行队列保证文件写不竞争（NSFileHandle 非线程安全）
+    static dispatch_queue_t logQ = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        logQ = dispatch_queue_create("com.qqfloatball.log", DISPATCH_QUEUE_SERIAL);
+    });
+    dispatch_async(logQ, ^{
         @try {
+            // 日志上限 5MB：超了自动停止抓包（防止日志爆炸拖慢系统）
+            NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:qqlogPath() error:nil];
+            NSNumber *sz = attrs[NSFileSize];
+            if (sz.longLongValue > 5 * 1024 * 1024) {
+                _captureEnabled = NO;
+                return;
+            }
             NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
             if (!fh) {
                 [[NSFileManager defaultManager] createFileAtPath:qqlogPath() contents:nil attributes:nil];
@@ -172,18 +185,23 @@ static void qqlogAsync(NSString *fmt, ...) {
                     if (body.length > 500) body = [body substringToIndex:500];
                 }
                 qqlogAsync(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url, body);
-                // 记录响应（异步包装）——只对关键接口记录，避免拖慢
+                // 记录响应：先立即调原 handler（零延迟！），日志异步后台做
                 void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-                    @try {
-                        if (data.length > 0) {
-                            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                            if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
-                            qqlogAsync(@"[NSURLSession]  ← RESP %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, respStr);
-                        } else if (err) {
-                            qqlogAsync(@"[NSURLSession]  ← ERR %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, err.localizedDescription);
-                        }
-                    } @catch (NSException *e) {}
-                    if (completionHandler) completionHandler(data, resp, err);
+                    if (completionHandler) completionHandler(data, resp, err);  // ← 立即放行，不阻塞页面
+                    NSString *u = [url copy];
+                    NSData *d = [data copy];
+                    NSError *e = err;
+                    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+                        @try {
+                            if (d.length > 0) {
+                                NSString *respStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                                if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
+                                qqlogAsync(@"[NSURLSession]  ← RESP %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, respStr);
+                            } else if (e) {
+                                qqlogAsync(@"[NSURLSession]  ← ERR %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, e.localizedDescription);
+                            }
+                        } @catch (NSException *ex) {}
+                    });
                 };
                 return %orig(request, wrapped);
             }

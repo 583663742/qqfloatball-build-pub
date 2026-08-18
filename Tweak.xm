@@ -6,16 +6,23 @@
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
 
-// ── 网络抓包日志（写入 /var/jb/tmp/qqflog.txt）──
+// ── 抓包开关：YES=记录网络请求；NO=停止 ──
+static BOOL _captureEnabled = NO;
+
+// ── 网络抓包日志（写入 app 沙盒 Documents，SSH 可读）──
+static NSString *qqlogPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqflog.txt"];
+}
+
 static void qqlog(NSString *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/var/jb/tmp/qqflog.txt"];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
     if (!fh) {
-        [[NSFileManager defaultManager] createFileAtPath:@"/var/jb/tmp/qqflog.txt" contents:nil attributes:nil];
-        fh = [NSFileHandle fileHandleForWritingAtPath:@"/var/jb/tmp/qqflog.txt"];
+        [[NSFileManager defaultManager] createFileAtPath:qqlogPath() contents:nil attributes:nil];
+        fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
     }
     if (fh) {
         [fh seekToEndOfFile];
@@ -86,7 +93,9 @@ static void qqlog(NSString *fmt, ...) {
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     @try {
-        qqlog(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"");
+        if (_captureEnabled) {
+            qqlog(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"");
+        }
     } @catch (NSException *e) {}
     return %orig(request, completionHandler);
 }
@@ -122,10 +131,12 @@ static void dumpWebKitCookies(void) {
 
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
     @try {
-        qqlog(@"[WKWebView] loadRequest: %@", request.URL.absoluteString ?: @"");
-        if ([request.URL.absoluteString containsString:@"ti.qq.com"] ||
+        if (_captureEnabled) {
+            qqlog(@"[WKWebView] loadRequest: %@", request.URL.absoluteString ?: @"");
+        }
+        if (_captureEnabled && ([request.URL.absoluteString containsString:@"ti.qq.com"] ||
             [request.URL.absoluteString containsString:@"qqlevel"] ||
-            [request.URL.absoluteString containsString:@"tianxuan"]) {
+            [request.URL.absoluteString containsString:@"tianxuan"])) {
             dumpWebKitCookies();
         }
     } @catch (NSException *e) {}
@@ -233,20 +244,25 @@ static void dumpObjCClasses(void) {
 }
 
 // ──────────────────────────────────────────
-//  点击弹窗（开始抓包入口）
+//  点击弹窗（开始/停止抓包入口）
 // ──────────────────────────────────────────
 %new
 - (void)_floatBallTapped:(UIButton *)sender {
+    NSString *status = _captureEnabled ? @"● 抓包中" : @"○ 未抓包";
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"悬浮球"
-                                                                   message:@"开始抓包（枚举QQ网络类 + 抓取Cookie）"
+                                                                   message:[NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止", status]
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"开始抓包"
-                                              style:UIAlertActionStyleDefault
+    NSString *actionTitle = _captureEnabled ? @"停止抓包" : @"开始抓包";
+    [alert addAction:[UIAlertAction actionWithTitle:actionTitle
+                                              style:_captureEnabled ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        // 用户确认后：枚举类 + 抓 cookie
-        qqlog(@"[action] 用户点击开始抓包");
-        dumpObjCClasses();
-        dumpWebKitCookies();
+        _captureEnabled = !_captureEnabled;
+        qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
+        if (_captureEnabled) {
+            // 开始抓包：先枚举类 + dump cookie，再开始记录
+            dumpObjCClasses();
+            dumpWebKitCookies();
+        }
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"
                                               style:UIAlertActionStyleCancel

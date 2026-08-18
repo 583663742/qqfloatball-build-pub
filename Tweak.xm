@@ -1,4 +1,6 @@
 #import <UIKit/UIKit.h>
+#import <WebKit/WebKit.h>
+#import <objc/message.h>
 
 // ── 持有悬浮球窗口和按钮的强引用，防止 ARC 释放 ──
 static UIWindow *_floatWindow = nil;
@@ -91,30 +93,43 @@ static void qqlog(NSString *fmt, ...) {
 
 %end
 
-// ── Cookie 侦察：hook NSHTTPCookieStorage 拿登录态 ──
-%hook NSHTTPCookieStorage
-
-- (NSArray<NSHTTPCookie *> *)cookiesForURL:(NSURL *)URL {
-    NSArray *c = %orig;
+// ── Cookie 枚举：读 WKWebView 的 cookie store（含 httpOnly p_skey）──
+static void dumpWebKitCookies(void) {
     @try {
-        NSString *host = URL.host ?: @"";
-        if ([host containsString:@"qq.com"]) {
-            qqlog(@"[cookieForURL] %@ -> %lu cookies", host, (unsigned long)c.count);
-            for (NSHTTPCookie *ck in c) {
-                qqlog(@"  CK %@=%@ (domain=%@)", ck.name, ck.value, ck.domain);
+        Class wdsClass = NSClassFromString(@"WKWebsiteDataStore");
+        if (!wdsClass) { qqlog(@"[wkCookie] WKWebsiteDataStore 不存在"); return; }
+        id defaultStore = ((id (*)(id, SEL))objc_msgSend)(wdsClass, NSSelectorFromString(@"defaultDataStore"));
+        if (!defaultStore) { qqlog(@"[wkCookie] defaultDataStore 为空"); return; }
+        id cookieStore = ((id (*)(id, SEL))objc_msgSend)(defaultStore, NSSelectorFromString(@"httpCookieStore"));
+        if (!cookieStore) { qqlog(@"[wkCookie] httpCookieStore 为空"); return; }
+        SEL getAllSel = NSSelectorFromString(@"getAllCookies:");
+        void (^handler)(NSArray *) = ^(NSArray *cookies) {
+            qqlog(@"[wkCookie] 共 %lu 个 cookie", (unsigned long)cookies.count);
+            for (NSHTTPCookie *ck in cookies) {
+                NSString *dom = ck.domain ?: @"";
+                if ([dom containsString:@"qq.com"] || [dom containsString:@"tencent.com"]) {
+                    qqlog(@"[wkCookie] %@  %@=%@", dom, ck.name, ck.value);
+                }
             }
-        }
-    } @catch (NSException *e) {}
-    return c;
+        };
+        ((void (*)(id, SEL, id))objc_msgSend)(cookieStore, getAllSel, handler);
+    } @catch (NSException *e) {
+        qqlog(@"[wkCookie] 异常: %@", e);
+    }
 }
 
-- (void)setCookie:(NSHTTPCookie *)cookie {
+%hook WKWebView
+
+- (WKNavigation *)loadRequest:(NSURLRequest *)request {
     @try {
-        if ([cookie.domain containsString:@"qq.com"]) {
-            qqlog(@"[setCookie] %@=%@ domain=%@", cookie.name, cookie.value, cookie.domain);
+        qqlog(@"[WKWebView] loadRequest: %@", request.URL.absoluteString ?: @"");
+        if ([request.URL.absoluteString containsString:@"ti.qq.com"] ||
+            [request.URL.absoluteString containsString:@"qqlevel"] ||
+            [request.URL.absoluteString containsString:@"tianxuan"]) {
+            dumpWebKitCookies();
         }
     } @catch (NSException *e) {}
-    %orig;
+    return %orig(request);
 }
 
 %end

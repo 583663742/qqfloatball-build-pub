@@ -324,21 +324,60 @@ static BOOL shouldBlockNav(NSString *url) {
     objc_setAssociatedObject(self, kQQFBInjectRunningKey, @(flag), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-// 自动注入领奖脚本：延迟后注入，页面未就绪（about:blank/加载中）则重试
-// Qsped 模拟器方案：页面停留网页版后，页面内 JS 同源 fetch TRPC（levelTask/Get + ExecAct），
-// cookie 自动带、无插件进程 -3000 死路
+// ═══════════════════════════════════════════════════════════════════
+//  【注入链死锁问题 · 完整记录】
+//
+//  ▸ 现象日志（沙盒 Documents/qqflog.txt 真实出现过）:
+//    [WKWebView] 拦截about:blank清空 -> 恢复任务页
+//    [WKWebView] 恢复任务页: https://ti.qq.com/qqlevel/task-center?...
+//    —— 此后 [autoClaim] 一行都没有，注入链"消失"了。
+//    再次点"⚡ 一键做任务" → 日志 [autoClaim] 已有注入链在跑，跳过重复启动
+//    结论：injectRunning=YES 死锁，evaluateJavaScript completion 永不回调。
+//
+//  ▸ 根因分析:
+//    QQ 把 WebView 清成 about:blank 有两条路径：① 同步 loadRequest:about:blank（
+//    已拦截）；② 先 kill 掉 WebContent 进程 / 重建内部 BackForwardList / 直接
+//    走  loadHTMLString:@"" / 或 更底层 _setDocumentURL 等 私有 API。此时
+//    WKWebView 对外壳看起来"活着"，但 JS 引擎侧已经失联，evaluateJavaScript 的
+//    completion block 既不 success 也不 error，就**永远挂着**。我们的 unlock 逻
+//    辑只在 completion 里，于是 injectRunning 关联对象**永久卡死在 YES**。
+//
+//  ▸ 3 个可选修复方向:
+//    ①【本方案采用 · 最轻量】给每层 evaluateJavaScript 加 5s 看门狗（dispatch_after）。
+//      看门狗先于 completion 触发就判为"completion 挂死"，强制解锁 + 恢复 + 重启链。
+//      为避免"看门狗触发后 completion 又姗姗来迟"的双跑，用 __block BOOL fired 做
+//      CAS 式抢占，谁先把 fired=YES 谁就握有推进权。
+//    ②【更可靠，但改动大】hook WKWebView setNavigationDelegate: 包一层中间代理，
+//      靠 didFinishNavigation / didFailNavigation 来触发注入，天然避开"JS死等"。
+//      缺点是 QQ 可能在多个时机换 delegate、自定义子类 QQWKWebView 可能不走通用 setter。
+//    ③【兜底补充】在"一键做任务"按钮 handler 加检测：若 injectRunning=YES 但 15s
+//      内没任何 [autoClaim] 日志推进，则强制 reset injectRunning=NO（暴力解锁）。
+//      实现简单但无法根因修复，只是给用户手点的逃生通道。
+//
+//  ▸ 注意事项（严格遵守）:
+//    ❌ 别改动 WKWebView 层已有的 about:blank / Kuikly / loadHTMLString / loadData
+//       拦截逻辑——日志已确认它们命中有效。
+//    ❌ 别把 attempt 重启写成 attempt:0 新开链；超时是同一条链内部的"伪推进"，必
+//       须走 attempt+1，否则 injectRunning 防重入会被绕开。
+//    ✅ 每次超时必须：[1] 解锁 injectRunning=NO [2] setTracked=YES（保证恢复路
+//       径拦截生效）[3] _qqfb_restoreIfCleared（或 loadRequest 任务页）[4] 调
+//       injectAutoClaimWithRetry: attempt+1（注意必须先解锁，否则 attempt+1 内的
+//       上层检查不会新开——但 attempt>0 不走 attempt==0 分支所以没事，安全）。
+// ═══════════════════════════════════════════════════════════════════
+//  Qsped 模拟器方案：页面停留网页版后，页面内 JS 同源 fetch TRPC（levelTask/Get +
+//  ExecAct），cookie 自动带、无插件进程 -3000 死路。
 %new
 - (void)injectAutoClaimWithRetry:(__weak WKWebView *)weakSelf attempt:(int)attempt {
     // attempt==0 表示由外部启动新链；>0 是同一条链的后续重试
     if (attempt == 0) {
         if ([self _qqfb_injectRunning]) {
-            qqlog(@"[autoClaim] 已有注入链在跑，跳过重复启动");
+            qqlog(@"[autoClaim] 已有注入链在跑，跳过重复启动（若卡死请看门狗/手点按钮重置）");
             return;
         }
         [self _qqfb_setInjectRunning:YES];
     }
-    if (attempt >= 8) {
-        qqlog(@"[autoClaim] 重试%d次仍失败，放弃", attempt);
+    if (attempt >= 10) {
+        qqlog(@"[autoClaim] 重试%d次仍失败（看门狗可能已救过多次），彻底放弃", attempt);
         [self _qqfb_setInjectRunning:NO];
         return;
     }
@@ -347,71 +386,143 @@ static BOOL shouldBlockNav(NSString *url) {
         WKWebView *strongSelf = weakSelf;
         if (!strongSelf) {
             qqlog(@"[autoClaim] webview 已释放，终止重试");
-            // 注意：此处 self 已释放，关联对象自动清，无需手动 setInjectRunning:NO
+            [weakSelf _qqfb_setInjectRunning:NO];
             return;
         }
-        // 先查当前 URL 是否已就绪（页面停留网页版而非 about:blank）
-        [strongSelf evaluateJavaScript:@"location.href" completionHandler:^(id _Nullable r, NSError * _Nullable e) {
-            WKWebView *ss = strongSelf;
-            if (!ss) { [weakSelf _qqfb_setInjectRunning:NO]; return; }
-            if (e || ![r isKindOfClass:[NSString class]] || [(NSString *)r length] == 0) {
-                qqlog(@"[autoClaim] 第%d次：页面未就绪（%@），重试", attempt + 1, e ? e.localizedDescription : @"空URL");
-                [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                return;
-            }
-            NSString *cur = (NSString *)r;
-            if ([cur isEqualToString:@"about:blank"] || [cur hasPrefix:@"about:"]) {
-                qqlog(@"[autoClaim] 第%d次：about:blank，主动恢复任务页", attempt + 1);
-                // 标记追踪，保证恢复前的清空被拦截
-                [ss _qqfb_setTracked:YES];
-                // 先恢复，恢复完成后的下一个周期再注入（避免立即重试抢时序）
-                NSString *last = [ss _qqfb_lastGoodURL];
+
+        // ───────────────────────────────────────────────────
+        //  第 1 层：查 location.href （带 5s 看门狗）
+        // ───────────────────────────────────────────────────
+        @autoreleasepool {
+            __block BOOL fired1 = NO;
+            void (^timeout1)(void) = ^{
+                if (fired1) return;
+                fired1 = YES;  // 看门狗抢到推进权
+                qqlog(@"[autoClaim] 第%d次：⚡看门狗超时！第1层location.href回调永不触发，强制解锁+恢复+重启", attempt + 1);
+                [strongSelf _qqfb_setInjectRunning:NO];
+                [strongSelf _qqfb_setTracked:YES];
+                NSString *last = [strongSelf _qqfb_lastGoodURL];
                 if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
-                [ss loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
-                // 恢复 + 等待页面加载需要更久，直接 schedule 下一次（保持同一条注入链）
-                [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                return;
-            }
-            // 检查是否已在任务页，不是的话标记为未追踪
-            if (!isTaskCenterPage(cur)) {
-                qqlog(@"[autoClaim] 第%d次：URL非任务页: %@", attempt + 1,
-                      cur.length > 120 ? [cur substringToIndex:120] : cur);
-                [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                return;
-            }
-            // URL 正常，再看 DOM readyState
-            [ss evaluateJavaScript:@"document.readyState" completionHandler:^(id _Nullable rs, NSError * _Nullable rse) {
-                WKWebView *ss2 = ss;
-                if (!ss2) { [ss _qqfb_setInjectRunning:NO]; return; }
-                NSString *ready = [rs isKindOfClass:[NSString class]] ? rs : nil;
-                if (!ready || (![ready isEqualToString:@"interactive"] && ![ready isEqualToString:@"complete"])) {
-                    qqlog(@"[autoClaim] 第%d次：DOM未就绪 readyState=%@，重试", attempt + 1, ready ?: @"nil");
-                    [ss2 injectAutoClaimWithRetry:ss2 attempt:attempt + 1];
+                @try {
+                    [strongSelf loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
+                } @catch (NSException *ee) {}
+                // 同一条链内部推进：attempt+1
+                [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
+            };
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), timeout1);
+
+            [strongSelf evaluateJavaScript:@"location.href" completionHandler:^(id _Nullable r, NSError * _Nullable e) {
+                if (fired1) return;  // 看门狗先抢了，别再双跑
+                fired1 = YES;
+                WKWebView *ss = strongSelf;
+                if (!ss) { [weakSelf _qqfb_setInjectRunning:NO]; return; }
+
+                if (e || ![r isKindOfClass:[NSString class]] || [(NSString *)r length] == 0) {
+                    qqlog(@"[autoClaim] 第%d次：页面未就绪（%@），重试", attempt + 1, e ? e.localizedDescription : @"空URL");
+                    [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
                     return;
                 }
-                [ss2 evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
-                    WKWebView *ss3 = ss2;
-                    if (!ss3) { return; }
-                    if (error) {
-                        qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
-                        qqlogUI([NSString stringWithFormat:@"注入失败: %@", error.localizedDescription]);
-                        [ss3 injectAutoClaimWithRetry:ss3 attempt:attempt + 1];
-                    } else {
-                        NSString *res = result ?: @"";
-                        qqlog(@"[autoClaim] 注入结果: %@", res.length > 500 ? [res substringToIndex:500] : res);
-                        qqlogUI([NSString stringWithFormat:@"自动任务: %@", res.length > 180 ? [res substringToIndex:180] : res]);
-                        // 若脚本报 not_level_page（页面又跳走了）或 api_fail，再重试
-                        if ([res containsString:@"not_level_page"] || [res containsString:@"api_fail"]) {
-                            [ss3 injectAutoClaimWithRetry:ss3 attempt:attempt + 1];
-                        } else {
-                            // 成功（或脚本执行完毕且未要求重试）→ 结束注入链
-                            qqlog(@"[autoClaim] 注入链正常结束");
-                            [ss3 _qqfb_setInjectRunning:NO];
+                NSString *cur = (NSString *)r;
+                if ([cur isEqualToString:@"about:blank"] || [cur hasPrefix:@"about:"]) {
+                    qqlog(@"[autoClaim] 第%d次：about:blank，主动恢复任务页", attempt + 1);
+                    [ss _qqfb_setTracked:YES];
+                    NSString *last = [ss _qqfb_lastGoodURL];
+                    if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
+                    @try {
+                        [ss loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
+                    } @catch (NSException *ee) {}
+                    [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
+                    return;
+                }
+                if (!isTaskCenterPage(cur)) {
+                    qqlog(@"[autoClaim] 第%d次：URL非任务页: %@", attempt + 1,
+                          cur.length > 120 ? [cur substringToIndex:120] : cur);
+                    [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
+                    return;
+                }
+
+                // ───────────────────────────────────────────────────
+                //  第 2 层：查 document.readyState （带 5s 看门狗）
+                // ───────────────────────────────────────────────────
+                @autoreleasepool {
+                    __block BOOL fired2 = NO;
+                    void (^timeout2)(void) = ^{
+                        if (fired2) return;
+                        fired2 = YES;
+                        qqlog(@"[autoClaim] 第%d次：⚡看门狗超时！第2层readyState回调永不触发，强制解锁+恢复+重启", attempt + 1);
+                        [ss _qqfb_setInjectRunning:NO];
+                        [ss _qqfb_setTracked:YES];
+                        NSString *last = [ss _qqfb_lastGoodURL];
+                        if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
+                        @try {
+                            [ss loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
+                        } @catch (NSException *ee) {}
+                        [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
+                    };
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), timeout2);
+
+                    [ss evaluateJavaScript:@"document.readyState" completionHandler:^(id _Nullable rs, NSError * _Nullable rse) {
+                        if (fired2) return;
+                        fired2 = YES;
+                        WKWebView *ss2 = ss;
+                        if (!ss2) { [ss _qqfb_setInjectRunning:NO]; return; }
+                        NSString *ready = [rs isKindOfClass:[NSString class]] ? rs : nil;
+                        if (!ready || (![ready isEqualToString:@"interactive"] && ![ready isEqualToString:@"complete"])) {
+                            qqlog(@"[autoClaim] 第%d次：DOM未就绪 readyState=%@，重试", attempt + 1, ready ?: @"nil");
+                            [ss2 injectAutoClaimWithRetry:ss2 attempt:attempt + 1];
+                            return;
                         }
-                    }
-                }];
+
+                        // ───────────────────────────────────────────────────
+                        //  第 3 层：真正注入 autoClaimScript() （带 20s 看门狗）
+                        //  脚本内有同步 XHR fetch TRPC 可能耗时稍长，给足 20s
+                        // ───────────────────────────────────────────────────
+                        @autoreleasepool {
+                            __block BOOL fired3 = NO;
+                            void (^timeout3)(void) = ^{
+                                if (fired3) return;
+                                fired3 = YES;
+                                qqlog(@"[autoClaim] 第%d次：⚡看门狗超时！第3层领奖脚本执行永不回调（20s），强制解锁+恢复+重启", attempt + 1);
+                                [ss2 _qqfb_setInjectRunning:NO];
+                                [ss2 _qqfb_setTracked:YES];
+                                NSString *last = [ss2 _qqfb_lastGoodURL];
+                                if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
+                                @try {
+                                    [ss2 loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
+                                } @catch (NSException *ee) {}
+                                [ss2 injectAutoClaimWithRetry:ss2 attempt:attempt + 1];
+                            };
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)),
+                                           dispatch_get_main_queue(), timeout3);
+
+                            [ss2 evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
+                                if (fired3) return;
+                                fired3 = YES;
+                                WKWebView *ss3 = ss2;
+                                if (!ss3) { return; }
+                                if (error) {
+                                    qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
+                                    qqlogUI([NSString stringWithFormat:@"注入失败: %@", error.localizedDescription]);
+                                    [ss3 injectAutoClaimWithRetry:ss3 attempt:attempt + 1];
+                                } else {
+                                    NSString *res = result ?: @"";
+                                    qqlog(@"[autoClaim] 注入结果: %@", res.length > 500 ? [res substringToIndex:500] : res);
+                                    qqlogUI([NSString stringWithFormat:@"自动任务: %@", res.length > 180 ? [res substringToIndex:180] : res]);
+                                    if ([res containsString:@"not_level_page"] || [res containsString:@"api_fail"]) {
+                                        [ss3 injectAutoClaimWithRetry:ss3 attempt:attempt + 1];
+                                    } else {
+                                        qqlog(@"[autoClaim] 注入链正常结束");
+                                        [ss3 _qqfb_setInjectRunning:NO];
+                                    }
+                                }
+                            }];
+                        }
+                    }];
+                }
             }];
-        }];
+        }
     });
 }
 
@@ -992,8 +1103,31 @@ static void openTaskCenterWebView(void) {
 %new
 - (void)_floatBallTapped:(UIButton *)sender {
     NSString *status = _captureEnabled ? @"● 抓包中" : @"○ 未抓包";
+    // ── 扫描所有 scene/window 找任意 webview 的锁状态，给用户直观提示 ──
+    NSMutableString *lockedInfo = [NSMutableString string];
+    NSInteger lockedCount = 0;
+    @try {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *win in [(UIWindowScene *)scene windows]) {
+                WKWebView *wvFound = findWKWebViewInView(win);
+                if (wvFound && [wvFound _qqfb_injectRunning]) {
+                    lockedCount++;
+                    [lockedInfo appendFormat:@"  · %@ 锁死\n", NSStringFromClass([wvFound class])];
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    NSString *msg;
+    if (lockedCount > 0) {
+        msg = [NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止\n\n⚠️ 检测到 %ld 个 WebView 注入死锁！\n%@点 🔧 强制解锁 可恢复",
+               status, (long)lockedCount, lockedInfo];
+    } else {
+        msg = [NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止", status];
+    }
+
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"悬浮球"
-                                                                   message:[NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止", status]
+                                                                   message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
     NSString *actionTitle = _captureEnabled ? @"停止抓包" : @"开始抓包";
     [alert addAction:[UIAlertAction actionWithTitle:actionTitle
@@ -1015,6 +1149,49 @@ static void openTaskCenterWebView(void) {
         qqlog(@"[action] 一键做任务 -> 打开等级页");
         openTaskCenterWebView();
     }]];
+    // 手动兜底：方向③ —— 暴力解锁所有 WKWebView 的 injectRunning / Tracked 以及全局状态
+    if (lockedCount > 0) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"🔧 强制解锁死锁"
+                                                  style:UIAlertActionStyleDestructive
+                                                handler:^(UIAlertAction *action) {
+            NSInteger unlocked = 0;
+            @try {
+                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+                    for (UIWindow *win in [(UIWindowScene *)scene windows]) {
+                        // 递归扫整个 window 视图树（含 present 的 VC.view）
+                        WKWebView *wv = nil;
+                        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+                        while (queue.count > 0 && !wv) {
+                            UIView *cur = queue.firstObject;
+                            [queue removeObjectAtIndex:0];
+                            if ([cur isKindOfClass:[WKWebView class]]) {
+                                wv = (WKWebView *)cur;
+                            } else {
+                                [queue addObjectsFromArray:cur.subviews];
+                            }
+                        }
+                        // 也扫描 presented VC 的 view
+                        UIViewController *topVC = win.rootViewController;
+                        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+                        if (!wv && topVC.view) wv = findWKWebViewInView(topVC.view);
+
+                        if (wv) {
+                            if ([wv _qqfb_injectRunning]) unlocked++;
+                            [wv _qqfb_setInjectRunning:NO];
+                            [wv _qqfb_setTracked:NO];
+                        }
+                    }
+                }
+            } @catch (NSException *e) {
+                qqlog(@"[action] 强制解锁异常: %@", e);
+            }
+            _inTaskCenter = NO;
+            qqlog(@"[action] 🔧 强制解锁完成，共解锁 %ld 个死锁 webview", (long)unlocked);
+            qqlogUI([NSString stringWithFormat:@"已解锁 %ld 个死锁，可重试一键任务", (long)unlocked]);
+            if (_logLabel) _logLabel.hidden = NO;
+        }]];
+    }
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"
                                               style:UIAlertActionStyleCancel
                                             handler:nil]];

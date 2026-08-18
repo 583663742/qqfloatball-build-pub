@@ -836,6 +836,20 @@ static void dumpPSKeys(void) {
     @try {
         id skey = ((id (*)(id, SEL))objc_msgSend)(mgr, NSSelectorFromString(@"getRealSig_SKEYStr"));
         if (skey) qqlog(@"[pskey] SKEY = %@", skey);
+
+        // ── bkn 计算（标准算法：skey 逐字符 hash）──
+        // 只有 skey 非空才计算，否则无意义
+        NSString *s = [skey isKindOfClass:[NSString class]] ? skey : nil;
+        if (s.length > 0) {
+            unsigned int hashV = 5381;
+            for (NSUInteger i = 0; i < s.length; i++) {
+                hashV = hashV + ((hashV << 5) & 0x7FFFFFFF) + [s characterAtIndex:i];
+            }
+            int bkn = hashV & 0x7FFFFFFF;
+            qqlog(@"[pskey] BKN = %d (skey长度=%lu)", bkn, (unsigned long)s.length);
+        } else {
+            qqlog(@"[pskey] SKEY 为空，跳过 bkn 计算");
+        }
     } @catch (NSException *e) {
         qqlog(@"[pskey] SKEY 异常 %@", e);
     }
@@ -1142,11 +1156,12 @@ static void openTaskCenterWebView(void) {
             dumpPSKeys();
         }
     }]];
-    // 一键做任务：打开等级页 WebView，自动注入领取
+    // 一键做任务（阶段1：先探测三件套，再走原 WebView 逻辑）
     [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键做任务"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        qqlog(@"[action] 一键做任务 -> 打开等级页");
+        qqlog(@"[action] 一键做任务 -> 探测三件套 + 打开等级页");
+        dumpPSKeys();
         openTaskCenterWebView();
     }]];
     // 手动兜底：方向③ —— 暴力解锁所有 WKWebView 的 injectRunning / Tracked 以及全局状态

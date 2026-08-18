@@ -23,6 +23,8 @@ static void qqlogUI(NSString *msg) {
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 static BOOL _captureEnabled = NO;
+// ── 抓包模式：YES=只抓等级/任务关键词；NO=全量抓（排除打点/图片噪声）──
+static BOOL _captureOnlyTasks = YES;
 // ── 一键任务停止标记：YES=停止当前任务循环；NO=继续 ──
 static BOOL _autoStop = NO;
 // 标记当前 QQWebViewController 是否停留在等级任务中心页（用于拦截清空/跳走）
@@ -140,16 +142,29 @@ static void qqlogAsync(NSString *fmt, ...) {
     @try {
         if (_captureEnabled) {
             NSString *url = request.URL.absoluteString ?: @"";
-            // 只记录等级相关关键词请求（收窄！避免 club.vip.qq.com 等宽域刷爆+拖慢页面）
-            // 注意：无关请求完全不包装 completionHandler，零干预 QQ 页面加载
-            BOOL relevant = ([url containsString:@"qqlevel"]
+            // 抓包 v3：全请求记录（排除打点/静态资源噪声），异步日志不卡界面
+            // 噪声排除：report/action 打点、图片/字体/JS/CSS 静态资源、统计上报
+            BOOL noise = ([url containsString:@"/report/action"]
+                       || [url containsString:@"reportData"]
+                       || [url containsString:@"monitor"]
+                       || [url containsString:@"mta.qq.com"]
+                       || [url containsString:@"beacon.qq.com"]
+                       || [url hasSuffix:@".png"] || [url hasSuffix:@".jpg"] || [url hasSuffix:@".jpeg"]
+                       || [url hasSuffix:@".gif"] || [url hasSuffix:@".webp"] || [url hasSuffix:@".css"]
+                       || [url hasSuffix:@".js"] || [url hasSuffix:@".woff"] || [url hasSuffix:@".woff2"]
+                       || [url hasSuffix:@".ttf"] || [url hasSuffix:@".ico"] || [url hasSuffix:@".mp4"]);
+            // 等级/任务相关关键词：记录请求+响应（重点）
+            BOOL keyTask = ([url containsString:@"qqlevel"]
                           || [url containsString:@"tianxuan"]
                           || [url containsString:@"commdeliver"]
                           || [url containsString:@"levelTask"]
                           || [url containsString:@"ExecAct"]
                           || [url containsString:@"GetUserRecord"]
-                          || [url containsString:@"openKuikly"]);
-            if (relevant) {
+                          || [url containsString:@"openKuikly"]
+                          || [url containsString:@"dengji_task"]
+                          || [url containsString:@"task-center"]
+                          || [url containsString:@"signin"]);
+            if (!noise && (keyTask || !_captureOnlyTasks)) {
                 NSString *body = @"";
                 if (request.HTTPBody.length > 0) {
                     body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
@@ -871,11 +886,22 @@ static void dumpPSKeys(void) {
     }
 }
 
-// ── hook Kuikly 请求模型：抓等级页真实请求 URL/cmd（只读日志）──
+// ── hook Kuikly 请求模型：抓等级页真实请求 URL/cmd/body（只读日志）──
 %hook QQKuiklyHTTPRequestItem
 - (void)setUrl:(NSString *)url {
     if (_captureEnabled) {
-        qqlog(@"[kuikly] HTTPRequest url=%@", url);
+        // 也读 body（QQKuiklyBaseRequestItem 的属性）
+        NSString *body = @"";
+        @try {
+            id b = [self valueForKey:@"body"];
+            if ([b isKindOfClass:[NSString class]]) body = (NSString *)b;
+            else if ([b isKindOfClass:[NSDictionary class]]) {
+                NSData *jd = [NSJSONSerialization dataWithJSONObject:b options:0 error:nil];
+                if (jd) body = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding];
+            }
+            if (body.length > 300) body = [body substringToIndex:300];
+        } @catch (NSException *e) {}
+        qqlog(@"[kuikly] HTTPRequest url=%@ body=%@", url, body);
     }
     %orig;
 }
@@ -1171,6 +1197,14 @@ static void openTaskCenterWebView(void) {
             dumpKeyClassMethods();
             dumpPSKeys();
         }
+    }]];
+    // 抓包模式切换：只抓等级关键词 vs 全量抓（排除打点/图片）
+    [alert addAction:[UIAlertAction actionWithTitle:_captureOnlyTasks ? @"📡 全量抓包（切换）" : @"🎯 仅等级任务（切换）"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        _captureOnlyTasks = !_captureOnlyTasks;
+        qqlog(@"[action] 抓包模式切换: %@", _captureOnlyTasks ? @"仅等级任务关键词" : @"全量抓包");
+        qqlogUI(_captureOnlyTasks ? @"已切换：仅抓等级任务请求" : @"已切换：全量抓包（做任务时的所有请求都会记录）");
     }]];
     // 一键做任务（阶段1：先探测三件套，再走原 WebView 逻辑）
     [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键做任务"

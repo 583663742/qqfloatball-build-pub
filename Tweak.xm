@@ -260,16 +260,14 @@ static NSString *getPSKey(NSString *domain, NSString *uin) {
     return nil;
 }
 
-// ── 拼四域 Cookie 头 ──
-static NSString *fourDomainCookie(NSString *uin) {
-    NSMutableString *ck = [NSMutableString string];
-    NSArray *domains = @[@"ti.qq.com", @"qun.qq.com", @"vip.qq.com", @"qzone.qq.com"];
-    for (NSString *d in domains) {
-        NSString *pk = getPSKey(d, uin);
-        if (pk) {
-            if (ck.length > 0) [ck appendString:@"; "];
-            [ck appendFormat:@"p_skey=%@", pk];
-        }
+// ── 拼 Cookie 头（只需 ti 域 p_skey + uin/p_uin，skey 可选）──
+static NSString *buildCookieHeader(NSString *uin, NSString *tiKey, NSString *skey) {
+    NSMutableString *ck = [NSMutableString stringWithFormat:@"uin=o%@;p_uin=o%@", uin, uin];
+    if (skey.length > 0) {
+        [ck appendFormat:@";skey=%@", skey];
+    }
+    if (tiKey.length > 0) {
+        [ck appendFormat:@";p_skey=%@", tiKey];
     }
     return ck;
 }
@@ -294,9 +292,18 @@ static void postJSON(NSString *urlStr, NSString *bodyJson, NSString *cookie, voi
 // ── 一键做任务：Get 列表 → 日志 → 自动领奖可领取的 ──
 static void runLevelTaskAuto(NSString *uin) {
     NSString *tiKey = getPSKey(@"ti.qq.com", uin);
-    if (!tiKey) { qqlog(@"[auto] ti 域 p_skey 获取失败"); return; }
-    NSInteger bkn = qqHash33(tiKey);
-    NSString *cookie = fourDomainCookie(uin);
+    NSString *qunKey = getPSKey(@"qun.qq.com", uin);
+    NSString *skey = nil;
+    @try {
+        Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
+        id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance"));
+        skey = ((id (*)(id, SEL))objc_msgSend)(mgr, NSSelectorFromString(@"getRealSig_SKEYStr"));
+    } @catch (...) {}
+    NSString *key = tiKey ?: qunKey;
+    if (!key) { qqlog(@"[auto] ti/qun 域 p_skey 均获取失败"); return; }
+    NSInteger bkn = qqHash33(key);
+    NSString *cookie = buildCookieHeader(uin, key, skey);
+    qqlog(@"[auto] key_type=%@ skey=%@%@", tiKey ? @"ti" : @"qun", skey ? @"有" : @"无", tiKey && qunKey ? @" 双key" : @"");
 
     // 1. Get 任务列表
     NSString *getUrl = [NSString stringWithFormat:@"https://ti.qq.com/qqlevel/trpc/levelTask/Get?bkn=%ld", (long)bkn];

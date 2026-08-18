@@ -316,6 +316,8 @@ static void dumpKeyClassMethods(void) {
         @"QQWebSSoSession", @"QQHttpClient", @"QQHttpClientSession", @"QQHttpClientSessionWrapper",
         @"QQNetworkEngine", @"QQCRHttpRequest", @"QQWTLogin", @"QQLoginAccountKeyChainModel",
         @"QQModelObject_tencent_im_oidb_lib_LoginSig", @"QQNetworkCommonImp",
+        @"QQWebViewController", @"QQWebView", @"QQWKWebView", @"QQWebViewUtils", @"QQWebViewPool",
+        @"QQWebViewPluginBase", @"QQWebViewBussinessPluginBase",
     ];
     for (NSString *cn in keyClasses) {
         Class cls = NSClassFromString(cn);

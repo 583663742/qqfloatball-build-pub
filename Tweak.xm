@@ -174,12 +174,6 @@ static void dumpObjCClasses(void) {
     // 避免重复创建
     if (_floatBall) return;
 
-    // 枚举一次 ObjC 类（找网络桥接类）
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        dumpObjCClasses();
-    });
-
     // ── 找活跃的 windowScene ──
     UIWindowScene *targetScene = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -239,15 +233,23 @@ static void dumpObjCClasses(void) {
 }
 
 // ──────────────────────────────────────────
-//  点击弹窗
+//  点击弹窗（开始抓包入口）
 // ──────────────────────────────────────────
 %new
 - (void)_floatBallTapped:(UIButton *)sender {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"你好"
-                                                                   message:@"你好"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"悬浮球"
+                                                                   message:@"开始抓包（枚举QQ网络类 + 抓取Cookie）"
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确认"
+    [alert addAction:[UIAlertAction actionWithTitle:@"开始抓包"
                                               style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        // 用户确认后：枚举类 + 抓 cookie
+        qqlog(@"[action] 用户点击开始抓包");
+        dumpObjCClasses();
+        dumpWebKitCookies();
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
+                                              style:UIAlertActionStyleCancel
                                             handler:nil]];
 
     // 优先从悬浮窗自己的 rootViewController 弹出（不干扰 QQ 页面）
@@ -301,14 +303,18 @@ static void dumpObjCClasses(void) {
 }
 %end
 
-// ── 构造器：dylib 加载即延迟执行（不依赖 setDelegate hook）──
+// ── 构造器：dylib 加载即重试创建悬浮球（不依赖 setDelegate hook）──
 __attribute__((constructor))
 static void qqfloatball_ctor(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UIApplication *app = [UIApplication sharedApplication];
-        if (app) {
+    // 循环重试：QQ 冷启动时 scene 可能几秒内还没就绪
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (int i = 0; i < 15; i++) {
+            UIApplication *app = [UIApplication sharedApplication];
+            if (!app) break;
             [app _setupFloatBall];
+            if (_floatBall) break;  // 球建好就停
+            // 在主队列等 2 秒再试
+            [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.0]];
         }
     });
 }

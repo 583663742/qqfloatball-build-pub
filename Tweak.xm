@@ -22,6 +22,8 @@ static void qqlogUI(NSString *msg) {
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 static BOOL _captureEnabled = NO;
+// 标记当前 QQWebViewController 是否停留在等级任务中心页（用于拦截清空/跳走）
+static BOOL _inTaskCenter = NO;
 
 // ── 网络抓包日志（写入 app 沙盒 Documents，SSH 可读）──
 static NSString *qqlogPath(void) {
@@ -363,10 +365,22 @@ static BOOL shouldBlockNav(NSString *url) {
 - (void)setUrl:(NSString *)url {
     @try {
         NSString *u = url ?: @"";
+        // 更新任务页状态：加载 task-center 时置 YES，跳走到别的页面时置 NO
+        if ([u containsString:@"ti.qq.com"] && [u containsString:@"qqlevel"]) {
+            _inTaskCenter = YES;
+        } else if (u.length > 0 && ![u containsString:@"qqlevel"]) {
+            _inTaskCenter = NO;
+        }
         // 拦截 Kuikly 自动跳转：让页面停留在 ti.qq.com 网页版任务中心（DOM 有按钮，JS 可点）
         // Kuikly 是原生渲染框架，跳转后 webview 变 about:blank，注入脚本永远点不到按钮
-        if ([u containsString:@"openKuikly"] && [u containsString:@"qqlevel"]) {
+        if ([u containsString:@"openKuikly"]) {
             qqlog(@"[QQWebVC] 拦截 Kuikly 跳转: %@", u);
+            return;
+        }
+        // 拦截空 URL 清空：QQ 跳转 Kuikly 前先把页面 setUrl 成空串清空 → 变 about:blank
+        // 当前在任务页时，任何清空动作都拦截，保持网页版任务中心
+        if (u.length == 0 && _inTaskCenter) {
+            qqlog(@"[QQWebVC] 拦截空URL清空（保持任务页）");
             return;
         }
         qqlog(@"[QQWebVC] setUrl: %@", u);

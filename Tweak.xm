@@ -193,11 +193,13 @@ static void dumpPSKeys(void) {
         for (NSString *u in uins) {
             for (int kt = 0; kt <= 2; kt++) {
                 @try {
+                    __unsafe_unretained NSString *dArg = d;
+                    __unsafe_unretained NSString *uArg = u;
                     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                     [inv setTarget:mgr];
                     [inv setSelector:sel];
-                    [inv setArgument:&d atIndex:2];
-                    [inv setArgument:&u atIndex:3];
+                    [inv setArgument:&dArg atIndex:2];
+                    [inv setArgument:&uArg atIndex:3];
                     NSInteger ktV = kt;
                     [inv setArgument:&ktV atIndex:4];
                     [inv invoke];

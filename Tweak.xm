@@ -277,22 +277,8 @@ static BOOL isTaskCenterPage(NSString *url) {
 }
 
 // 是否该拦截的跳转（模拟器 Qsped 方案：拦截一切离开 task-center 网页版的跳转）
-// 只放行 ti.qq.com/qqlevel 域 + ptlogin/check_sig 登录链；等级页相关跳转（Kuikly/mqqapi 深链）一律拦
-// ⚠️ 收窄条件：仅拦含 qqlevel 上下文的跳转，避免影响 QQ 其他 WebView 功能
-static BOOL shouldBlockNav(NSString *url) {
-    if (!url || url.length == 0) return NO;
-    // 登录链放行
-    if ([url containsString:@"ptlogin"] || [url containsString:@"check_sig"]) return NO;
-    // 等级页本身放行
-    if ([url containsString:@"ti.qq.com"] && [url containsString:@"qqlevel"]) return NO;
-    // Kuikly 任务页跳转（club.vip.qq.com/openKuikly + qqlevel 上下文）拦截
-    if ([url containsString:@"openKuikly"]) return YES;
-    // mqqapi:// 深链（含 qqlevel 上下文）拦截，防止页面跳走
-    if ([url hasPrefix:@"mqqapi://"] && [url containsString:@"qqlevel"]) return YES;
-    // 其他含 qqlevel 的跳转（如 qzone/vip 域任务落地页）拦截
-    if ([url containsString:@"qqlevel"]) return YES;
-    return NO;
-}
+// 阶段2：不再拦截跳转（等级页 = Kuikly 渲染，拦截导致白屏）
+// 原 shouldBlockNav 已删除——放行所有导航，让 QQ 自由渲染等级页
 
 // 声明接口让编译器可见（%new 实现只在 runtime 添加，编译期需要 category 声明；必须放 %hook 块外）
 @interface WKWebView (QQFBAutoClaim)

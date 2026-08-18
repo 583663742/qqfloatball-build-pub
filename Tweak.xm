@@ -890,10 +890,10 @@ static void dumpPSKeys(void) {
 %hook QQKuiklyHTTPRequestItem
 - (void)setUrl:(NSString *)url {
     if (_captureEnabled) {
-        // 也读 body（QQKuiklyBaseRequestItem 的属性）
+        // 也读 body（QQKuiklyBaseRequestItem 的属性，forward declaration 用 objc_msgSend 避免编译错误）
         NSString *body = @"";
         @try {
-            id b = [self valueForKey:@"body"];
+            id b = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"body"));
             if ([b isKindOfClass:[NSString class]]) body = (NSString *)b;
             else if ([b isKindOfClass:[NSDictionary class]]) {
                 NSData *jd = [NSJSONSerialization dataWithJSONObject:b options:0 error:nil];

@@ -235,10 +235,10 @@ static BOOL isTaskCenterPage(NSString *url) {
             [url containsString:@"tianxuan"])) {
             dumpWebKitCookies();
         }
-        // 自动注入领取脚本：等级页面加载后延迟注入（等自动跳转 Kuikly 完成；weak 防悬垂）
+        // 自动注入领取脚本：等级页面加载后延迟注入（已拦截 Kuikly 跳转，页面停留网页版；weak 防悬垂）
         if (isTaskCenterPage(url)) {
             __weak WKWebView *weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 WKWebView *strongSelf = weakSelf;
                 if (!strongSelf) return;
                 [strongSelf evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
@@ -286,7 +286,14 @@ static BOOL isTaskCenterPage(NSString *url) {
 
 - (void)setUrl:(NSString *)url {
     @try {
-        qqlog(@"[QQWebVC] setUrl: %@", url ?: @"");
+        NSString *u = url ?: @"";
+        // 拦截 Kuikly 自动跳转：让页面停留在 ti.qq.com 网页版任务中心（DOM 有按钮，JS 可点）
+        // Kuikly 是原生渲染框架，跳转后 webview 变 about:blank，注入脚本永远点不到按钮
+        if ([u containsString:@"openKuikly"] && [u containsString:@"qqlevel"]) {
+            qqlog(@"[QQWebVC] 拦截 Kuikly 跳转: %@", u);
+            return;
+        }
+        qqlog(@"[QQWebVC] setUrl: %@", u);
     } @catch (NSException *e) {}
     return %orig(url);
 }

@@ -127,20 +127,85 @@ static void dumpWebKitCookies(void) {
     }
 }
 
+// ── WebView 自动领取脚本（注入式）──
+static NSString *autoClaimScript(void) {
+    return @"(function(){"
+        "if(window._qqAutoClaimRunning)return;"
+        "window._qqAutoClaimRunning=true;"
+        "var clicked=0,total=0;"
+        "var log=function(msg){"
+        "  var d=document.createElement('div');"
+        "  d.style.cssText='position:fixed;bottom:10px;left:10px;z-index:999999;background:rgba(0,0,0,0.8);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;max-width:80%;word-break:break-all;';"
+        "  d.textContent='[自动任务] '+msg;"
+        "  document.body.appendChild(d);"
+        "  setTimeout(function(){d.remove()},3000);"
+        "};"
+        "var findAndClick=function(){"
+        "  var btns=document.querySelectorAll('button,div,span,a,[class*=\"btn\"],[class*=\"button\"]');"
+        "  var c=0;"
+        "  for(var i=0;i<btns.length;i++){"
+        "    var el=btns[i];"
+        "    var txt=(el.textContent||el.innerText||'');"
+        "    if(txt.indexOf('领取')>=0||txt.indexOf('去完成')>=0||txt.indexOf('去做')>=0){"
+        "      el.click();c++;clicked++;"
+        "      log('点击: '+txt.trim()+' (第'+clicked+'个)');"
+        "    }"
+        "  }"
+        "  return c;"
+        "};"
+        "var run=function(){"
+        "  var c=findAndClick();"
+        "  if(c===0&&clicked===0){"
+        "    log('未找到可领取任务，2秒后重试...');"
+        "  }"
+        "};"
+        "log('自动领取已启动，每2秒扫描一次');"
+        "run();"
+        "setInterval(run,2000);"
+        "})();";
+}
+
+// ── 检测 WebView 是否在等级页面──
+static BOOL isTaskCenterPage(NSString *url) {
+    if (!url) return NO;
+    return [url containsString:@"ti.qq.com"] && [url containsString:@"qqlevel"];
+}
+
 %hook WKWebView
 
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
     @try {
+        NSString *url = request.URL.absoluteString ?: @"";
         if (_captureEnabled) {
-            qqlog(@"[WKWebView] loadRequest: %@", request.URL.absoluteString ?: @"");
+            qqlog(@"[WKWebView] loadRequest: %@", url);
         }
-        if (_captureEnabled && ([request.URL.absoluteString containsString:@"ti.qq.com"] ||
-            [request.URL.absoluteString containsString:@"qqlevel"] ||
-            [request.URL.absoluteString containsString:@"tianxuan"])) {
+        if (_captureEnabled && ([url containsString:@"ti.qq.com"] ||
+            [url containsString:@"qqlevel"] ||
+            [url containsString:@"tianxuan"])) {
             dumpWebKitCookies();
+        }
+        // 自动注入领取脚本：等级页面加载时延迟注入
+        if (isTaskCenterPage(url)) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
+                    if (error) {
+                        qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
+                    } else {
+                        qqlog(@"[autoClaim] 已注入自动领取脚本");
+                    }
+                }];
+            });
         }
     } @catch (NSException *e) {}
     return %orig(request);
+}
+
+// hook evaluateJavaScript 记录
+- (void)evaluateJavaScript:(NSString *)script completionHandler:(void (^)(id, NSError *))completionHandler {
+    if (_captureEnabled && [script length] > 0 && [script length] < 200) {
+        qqlog(@"[WKWebView] eval: %@", [script substringToIndex:MIN(100, script.length)]);
+    }
+    %orig(script, completionHandler);
 }
 
 %end
@@ -471,6 +536,47 @@ static void dumpKeyClassMethods(void) {
     floatWindow.hidden = NO;
 }
 
+// ── 打开等级页面 WebView（带自动注入领取脚本）──
+static void openTaskCenterWebView(void) {
+    @try {
+        WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+        config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+        WKWebView *webView = [[WKWebView alloc] initWithFrame:[UIScreen mainScreen].bounds configuration:config];
+
+        UIViewController *vc = [[UIViewController alloc] init];
+        vc.view = webView;
+        vc.title = @"QQ等级任务中心";
+
+        // 加载等级页（带参数避免重定向）
+        NSURL *url = [NSURL URLWithString:@"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38"];
+        NSURLRequest *req = [NSURLRequest requestWithURL:url];
+        [webView loadRequest:req];
+        qqlog(@"[openTaskCenter] 加载等级页: %@", url.absoluteString);
+
+        // 呈现模态导航
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        UIViewController *presenter = _floatWindow.rootViewController;
+        if (presenter && !presenter.presentedViewController) {
+            [presenter presentViewController:nav animated:YES completion:nil];
+        } else {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    if (ws.activationState == UISceneActivationStateForegroundActive) {
+                        UIViewController *rootVC = ws.windows.firstObject.rootViewController;
+                        if (rootVC) {
+                            [rootVC presentViewController:nav animated:YES completion:nil];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        qqlog(@"[openTaskCenter] 异常: %@", e);
+    }
+}
+
 // ──────────────────────────────────────────
 //  点击弹窗（开始/停止抓包入口）
 // ──────────────────────────────────────────
@@ -487,26 +593,18 @@ static void dumpKeyClassMethods(void) {
         _captureEnabled = !_captureEnabled;
         qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
         if (_captureEnabled) {
-            // 开始抓包：枚举类 + dump cookie + 关键类方法 + 直接拿 p_skey
             dumpObjCClasses();
             dumpWebKitCookies();
             dumpKeyClassMethods();
             dumpPSKeys();
         }
     }]];
-    // 一键做任务（点球即自动 Get + 领奖）
+    // 一键做任务：打开等级页 WebView，自动注入领取
     [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键做任务"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        qqlog(@"[action] 一键做任务");
-        // 主号 uin：从 dumpPSKeys 的 uins 列表取第一个非空 p_skey 的
-        NSArray *uins = @[@"583663742", @"820284286", @"1172628163"];
-        for (NSString *u in uins) {
-            if (getPSKey(@"ti.qq.com", u)) {
-                runLevelTaskAuto(u);
-                break;
-            }
-        }
+        qqlog(@"[action] 一键做任务 -> 打开等级页");
+        openTaskCenterWebView();
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"
                                               style:UIAlertActionStyleCancel

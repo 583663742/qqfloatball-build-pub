@@ -140,28 +140,48 @@ static NSString *autoClaimScript(void) {
         "  document.body.appendChild(d);"
         "  setTimeout(function(){d.remove()},3000);"
         "};"
+        "var inTaskCenter=function(){"
+        "  return location.host.indexOf('ti.qq.com')>=0 && location.pathname.indexOf('qqlevel')>=0;"
+        "};"
         "var findAndClick=function(){"
+        "  if(!inTaskCenter()){"
+        "    log('已离开等级页，停止自动任务');"
+        "    clearInterval(window._qqAutoTimer);"
+        "    return 0;"
+        "  }"
         "  var btns=document.querySelectorAll('button,div,span,a,[class*=\"btn\"],[class*=\"button\"]');"
         "  var c=0;"
         "  for(var i=0;i<btns.length;i++){"
         "    var el=btns[i];"
-        "    var txt=(el.textContent||el.innerText||'');"
-        "    if(txt.indexOf('领取')>=0||txt.indexOf('去完成')>=0||txt.indexOf('去做')>=0){"
-        "      el.click();c++;clicked++;"
-        "      log('点击: '+txt.trim()+' (第'+clicked+'个)');"
-        "    }"
+        "    try{"
+        "      var txt=(el.textContent||el.innerText||'');"
+        "      if(txt.indexOf('领取')>=0||txt.indexOf('去完成')>=0||txt.indexOf('去做')>=0){"
+        "        el.click();c++;clicked++;"
+        "        log('点击: '+txt.trim()+' (第'+clicked+'个)');"
+        "        if(clicked>=3){"
+        "          log('已完成3个，停止扫描');"
+        "          clearInterval(window._qqAutoTimer);"
+        "          return c;"
+        "        }"
+        "      }"
+        "    }catch(e){}"
         "  }"
         "  return c;"
         "};"
         "var run=function(){"
-        "  var c=findAndClick();"
-        "  if(c===0&&clicked===0){"
-        "    log('未找到可领取任务，2秒后重试...');"
+        "  try{"
+        "    var c=findAndClick();"
+        "    if(c===0&&clicked===0){"
+        "      log('未找到可领取任务，2秒后重试...');"
+        "    }"
+        "  }catch(e){"
+        "    log('脚本异常: '+e.message);"
+        "    clearInterval(window._qqAutoTimer);"
         "  }"
         "};"
         "log('自动领取已启动，每2秒扫描一次');"
         "run();"
-        "setInterval(run,2000);"
+        "window._qqAutoTimer=setInterval(run,2000);"
         "})();";
 }
 
@@ -184,10 +204,13 @@ static BOOL isTaskCenterPage(NSString *url) {
             [url containsString:@"tianxuan"])) {
             dumpWebKitCookies();
         }
-        // 自动注入领取脚本：等级页面加载时延迟注入
+        // 自动注入领取脚本：等级页面加载时延迟注入（weak 保护，防止 WebView 释放后悬垂崩溃）
         if (isTaskCenterPage(url)) {
+            __weak WKWebView *weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
+                WKWebView *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                [strongSelf evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
                     if (error) {
                         qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
                     } else {
@@ -212,27 +235,16 @@ static BOOL isTaskCenterPage(NSString *url) {
 
 %end
 
-// ── 复用 QQ 内置浏览器：QQWebViewController hook（双保险注入）──
+// ── 复用 QQ 内置浏览器：QQWebViewController hook（只记录日志，不注入）──
 %hook QQWebViewController
 
 - (void)loadRequest:(NSURLRequest *)request {
     @try {
         NSString *url = request.URL.absoluteString ?: @"";
         qqlog(@"[QQWebVC] loadRequest: %@", url);
-        if (isTaskCenterPage(url)) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                // 动态调用 executeJsScript:completionHandler:（避免 forward declaration 编译错误）
-                SEL jsSel = NSSelectorFromString(@"executeJsScript:completionHandler:");
-                void (^handler)(id, NSError *) = ^(id result, NSError *error) {
-                    if (error) {
-                        qqlog(@"[autoClaim] QQWebVC 注入失败: %@", error.localizedDescription);
-                    } else {
-                        qqlog(@"[autoClaim] QQWebVC 已注入自动领取脚本");
-                    }
-                };
-                ((void (*)(id, SEL, id, id))objc_msgSend)(self, jsSel, autoClaimScript(), handler);
-            });
-        }
+        // 注意：不在 loadRequest 里注入脚本！
+        // 页面跳转到 Kuikly 页/控制器释放后 dispatch_after 里的 self 会悬垂 → 闪退
+        // 注入统一走 WKWebView evaluateJavaScript hook（下方）
     } @catch (NSException *e) {}
     %orig(request);
 }

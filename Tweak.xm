@@ -4,6 +4,13 @@
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
 
+// ── 提前声明 %new 方法，供 dispatch_once block 内调用 ──
+@interface UIApplication (QQFloatBall)
+- (void)_setupFloatBall;
+- (void)_floatBallTapped:(UIButton *)sender;
+- (void)_floatBallPanned:(UIPanGestureRecognizer *)pan;
+@end
+
 %hook UIApplication
 - (BOOL)setDelegate:(id)delegate {
     BOOL result = %orig(delegate);

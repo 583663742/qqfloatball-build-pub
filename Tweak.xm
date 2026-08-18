@@ -1158,7 +1158,9 @@ static void openTaskCenterWebView(void) {
 // ──────────────────────────────────────────
 %new
 - (void)_floatBallTapped:(UIButton *)sender {
-    NSString *status = _captureEnabled ? @"● 抓包中" : @"○ 未抓包";
+    NSString *status = @"○ 未抓包";
+    if (_captureEnabled && !_captureOnlyTasks) status = @"● 全量抓包中";
+    else if (_captureEnabled && _captureOnlyTasks) status = @"● 等级抓包中";
     // ── 扫描所有 scene/window 找任意 webview 的锁状态，给用户直观提示 ──
     NSMutableString *lockedInfo = [NSMutableString string];
     NSInteger lockedCount = 0;
@@ -1185,26 +1187,52 @@ static void openTaskCenterWebView(void) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"悬浮球"
                                                                    message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    NSString *actionTitle = _captureEnabled ? @"停止抓包" : @"开始抓包";
-    [alert addAction:[UIAlertAction actionWithTitle:actionTitle
-                                              style:_captureEnabled ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
+    // ── 抓包双按钮：全量抓包 / 等级抓包（点同一按钮 = 开启/停止，标题实时显示状态）──
+    NSString *fullTitle = _captureEnabled && !_captureOnlyTasks ? @"📡 全量抓包（进行中）" : @"📡 全量抓包";
+    NSString *taskTitle = _captureEnabled && _captureOnlyTasks ? @"🎯 等级抓包（进行中）" : @"🎯 等级抓包";
+    [alert addAction:[UIAlertAction actionWithTitle:fullTitle
+                                              style:(_captureEnabled && !_captureOnlyTasks) ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        _captureEnabled = !_captureEnabled;
-        qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
-        if (_captureEnabled) {
-            dumpObjCClasses();
-            dumpWebKitCookies();
-            dumpKeyClassMethods();
-            dumpPSKeys();
+        if (_captureEnabled && !_captureOnlyTasks) {
+            // 已是全量抓包中 → 停止
+            _captureEnabled = NO;
+            qqlog(@"[action] 全量抓包 停止");
+            qqlogUI(@"已停止全量抓包");
+        } else {
+            // 开启全量抓包
+            _captureEnabled = YES;
+            _captureOnlyTasks = NO;
+            qqlog(@"[action] 全量抓包 开始");
+            qqlogUI(@"已开启全量抓包（做任务的所有请求都会记录）");
+            if (_captureEnabled) {
+                dumpObjCClasses();
+                dumpWebKitCookies();
+                dumpKeyClassMethods();
+                dumpPSKeys();
+            }
         }
     }]];
-    // 抓包模式切换：只抓等级关键词 vs 全量抓（排除打点/图片）
-    [alert addAction:[UIAlertAction actionWithTitle:_captureOnlyTasks ? @"📡 全量抓包（切换）" : @"🎯 仅等级任务（切换）"
-                                              style:UIAlertActionStyleDefault
+    [alert addAction:[UIAlertAction actionWithTitle:taskTitle
+                                              style:(_captureEnabled && _captureOnlyTasks) ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        _captureOnlyTasks = !_captureOnlyTasks;
-        qqlog(@"[action] 抓包模式切换: %@", _captureOnlyTasks ? @"仅等级任务关键词" : @"全量抓包");
-        qqlogUI(_captureOnlyTasks ? @"已切换：仅抓等级任务请求" : @"已切换：全量抓包（做任务时的所有请求都会记录）");
+        if (_captureEnabled && _captureOnlyTasks) {
+            // 已是等级抓包中 → 停止
+            _captureEnabled = NO;
+            qqlog(@"[action] 等级抓包 停止");
+            qqlogUI(@"已停止等级抓包");
+        } else {
+            // 开启等级抓包
+            _captureEnabled = YES;
+            _captureOnlyTasks = YES;
+            qqlog(@"[action] 等级抓包 开始");
+            qqlogUI(@"已开启等级抓包（只记录等级任务相关请求）");
+            if (_captureEnabled) {
+                dumpObjCClasses();
+                dumpWebKitCookies();
+                dumpKeyClassMethods();
+                dumpPSKeys();
+            }
+        }
     }]];
     // 一键做任务（阶段1：先探测三件套，再走原 WebView 逻辑）
     [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键做任务"

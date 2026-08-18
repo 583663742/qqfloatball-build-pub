@@ -342,7 +342,7 @@ static BOOL shouldBlockNav(NSString *url) {
         [self _qqfb_setInjectRunning:NO];
         return;
     }
-    int64_t delaySec = (attempt == 0) ? 3.0 : 2.5;
+    int64_t delaySec = (attempt == 0) ? 3 : 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delaySec * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         WKWebView *strongSelf = weakSelf;
         if (!strongSelf) {
@@ -570,7 +570,7 @@ static WKWebView *findWKWebViewInView(UIView *v) {
     %orig(animated);
     @try {
         // viewDidAppear 时 view 树已建立，此时找 webview 打标最可靠
-        WKWebView *wv = findWKWebViewInView(self.view);
+        WKWebView *wv = findWKWebViewInView([self valueForKey:@"view"]);
         if (wv && _inTaskCenter) {
             [wv _qqfb_setTracked:YES];
             if (![wv _qqfb_lastGoodURL]) {
@@ -590,7 +590,7 @@ static WKWebView *findWKWebViewInView(UIView *v) {
         // 如果是任务页 URL，提前尝试找内部 webview 打标
         if (isTaskCenterPage(url)) {
             _inTaskCenter = YES;
-            WKWebView *wv = findWKWebViewInView(self.view);
+            WKWebView *wv = findWKWebViewInView([self valueForKey:@"view"]);
             if (wv) {
                 [wv _qqfb_setTracked:YES];
                 [wv _qqfb_setLastGoodURL:url];
@@ -611,14 +611,14 @@ static WKWebView *findWKWebViewInView(UIView *v) {
         if (isTaskCenterPage(u)) {
             _inTaskCenter = YES;
             // 同步内部 webview 打标
-            WKWebView *wv = findWKWebViewInView(self.view);
+            WKWebView *wv = findWKWebViewInView([self valueForKey:@"view"]);
             if (wv) {
                 [wv _qqfb_setTracked:YES];
                 [wv _qqfb_setLastGoodURL:u];
             }
         } else if (u.length > 0 && ![u containsString:@"qqlevel"]) {
             _inTaskCenter = NO;
-            WKWebView *wv = findWKWebViewInView(self.view);
+            WKWebView *wv = findWKWebViewInView([self valueForKey:@"view"]);
             if (wv) [wv _qqfb_setTracked:NO];
         }
         // 拦截 Kuikly 自动跳转：让页面停留在 ti.qq.com 网页版任务中心（DOM 有按钮，JS 可点）
@@ -626,7 +626,7 @@ static WKWebView *findWKWebViewInView(UIView *v) {
         if ([u containsString:@"openKuikly"]) {
             qqlog(@"[QQWebVC] 拦截 Kuikly 跳转: %@", u);
             // 同步让内部 webview 触发恢复
-            WKWebView *wv = findWKWebViewInView(self.view);
+            WKWebView *wv = findWKWebViewInView([self valueForKey:@"view"]);
             if (wv) {
                 [wv _qqfb_setTracked:YES];
                 [wv _qqfb_restoreIfCleared];
@@ -637,7 +637,7 @@ static WKWebView *findWKWebViewInView(UIView *v) {
         // 当前在任务页时，任何清空动作都拦截，保持网页版任务中心
         if (u.length == 0 && _inTaskCenter) {
             qqlog(@"[QQWebVC] 拦截空URL清空（保持任务页）");
-            WKWebView *wv = findWKWebViewInView(self.view);
+            WKWebView *wv = findWKWebViewInView([self valueForKey:@"view"]);
             if (wv) {
                 [wv _qqfb_setTracked:YES];
                 [wv _qqfb_restoreIfCleared];

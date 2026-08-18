@@ -38,6 +38,15 @@ static void qqlog(NSString *fmt, ...) {
 - (void)_floatBallPanned:(UIPanGestureRecognizer *)pan;
 @end
 
+// ── 前向声明 QQ 内置浏览器类（编译期不引入 QQ 头文件）──
+@class QQWebViewController;
+
+@interface QQWebViewController (QQFBHooks)
+- (void)loadRequest:(NSURLRequest *)request;
+- (void)setUrl:(NSString *)url;
+- (void)executeJsScript:(NSString *)script completionHandler:(void (^)(id _Nullable, NSError * _Nullable))completionHandler;
+@end
+
 %hook UIApplication
 - (BOOL)setDelegate:(id)delegate {
     BOOL result = %orig(delegate);

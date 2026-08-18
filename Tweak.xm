@@ -84,53 +84,37 @@ static void qqlog(NSString *fmt, ...) {
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     @try {
-        NSString *url = request.URL.absoluteString ?: @"";
-        if ([url containsString:@"ti.qq.com"] || [url containsString:@"club.vip.qq.com"] ||
-            [url containsString:@"qqlevel"] || [url containsString:@"tianxuan"] ||
-            [url containsString:@"levelTask"] || [url containsString:@"trpc"]) {
-            qqlog(@"\n========== REQ ==========");
-            qqlog(@"URL: %@", url);
-            qqlog(@"METHOD: %@", request.HTTPMethod ?: @"GET");
-            NSDictionary *hdrs = request.allHTTPHeaderFields;
-            for (NSString *k in hdrs) {
-                qqlog(@"HDR %@: %@", k, hdrs[k]);
-            }
-            NSData *body = request.HTTPBody;
-            if (request.HTTPBodyStream) {
-                NSInputStream *stream = request.HTTPBodyStream;
-                [stream open];
-                NSMutableData *bd = [NSMutableData data];
-                uint8_t buf[4096];
-                NSInteger n;
-                while ((n = [stream read:buf maxLength:sizeof(buf)]) > 0) {
-                    [bd appendBytes:buf length:n];
-                }
-                [stream close];
-                body = bd;
-            }
-            if (body.length > 0) {
-                NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-                qqlog(@"BODY: %@", bodyStr ?: @"(non-utf8)");
-            }
-        }
-    } @catch (NSException *e) {
-        qqlog(@"log exception: %@", e);
-    }
+        qqlog(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"");
+    } @catch (NSException *e) {}
     return %orig(request, completionHandler);
 }
 
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+%end
+
+// ── Cookie 侦察：hook NSHTTPCookieStorage 拿登录态 ──
+%hook NSHTTPCookieStorage
+
+- (NSArray<NSHTTPCookie *> *)cookiesForURL:(NSURL *)URL {
+    NSArray *c = %orig;
     @try {
-        NSString *url = request.URL.absoluteString ?: @"";
-        if ([url containsString:@"ti.qq.com"] || [url containsString:@"club.vip.qq.com"] ||
-            [url containsString:@"qqlevel"] || [url containsString:@"tianxuan"] ||
-            [url containsString:@"levelTask"] || [url containsString:@"trpc"]) {
-            qqlog(@"\n========== REQ(no-completion) ==========");
-            qqlog(@"URL: %@", url);
-            qqlog(@"METHOD: %@", request.HTTPMethod ?: @"GET");
+        NSString *host = URL.host ?: @"";
+        if ([host containsString:@"qq.com"]) {
+            qqlog(@"[cookieForURL] %@ -> %lu cookies", host, (unsigned long)c.count);
+            for (NSHTTPCookie *ck in c) {
+                qqlog(@"  CK %@=%@ (domain=%@)", ck.name, ck.value, ck.domain);
+            }
         }
     } @catch (NSException *e) {}
-    return %orig(request);
+    return c;
+}
+
+- (void)setCookie:(NSHTTPCookie *)cookie {
+    @try {
+        if ([cookie.domain containsString:@"qq.com"]) {
+            qqlog(@"[setCookie] %@=%@ domain=%@", cookie.name, cookie.value, cookie.domain);
+        }
+    } @catch (NSException *e) {}
+    %orig;
 }
 
 %end

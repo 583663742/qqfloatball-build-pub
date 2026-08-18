@@ -175,6 +175,53 @@ static void dumpObjCClasses(void) {
     }
 }
 
+// ── 直接调用 QQLoginPSKeyManager 拿 p_skey（免登录核心）──
+static void dumpPSKeys(void) {
+    Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
+    if (!mgrCls) { qqlog(@"[pskey] QQLoginPSKeyManager 不存在"); return; }
+    id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance"));
+    if (!mgr) { qqlog(@"[pskey] sharedInstance 为空"); return; }
+
+    NSArray *domains = @[@"ti.qq.com", @"qun.qq.com", @"vip.qq.com", @"qzone.qq.com"];
+    NSArray *uins = @[@"583663742", @"820284286", @"1172628163"];
+
+    SEL sel = NSSelectorFromString(@"getLocalKeyOfDomain:uin:keyType:");
+    NSMethodSignature *sig = [mgr methodSignatureForSelector:sel];
+    if (!sig) { qqlog(@"[pskey] 无 getLocalKeyOfDomain:uin:keyType: 签名"); return; }
+
+    for (NSString *d in domains) {
+        for (NSString *u in uins) {
+            for (int kt = 0; kt <= 2; kt++) {
+                @try {
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:mgr];
+                    [inv setSelector:sel];
+                    [inv setArgument:&d atIndex:2];
+                    [inv setArgument:&u atIndex:3];
+                    NSInteger ktV = kt;
+                    [inv setArgument:&ktV atIndex:4];
+                    [inv invoke];
+                    __unsafe_unretained id ret = nil;
+                    [inv getReturnValue:&ret];
+                    if (ret) {
+                        qqlog(@"[pskey] domain=%@ uin=%@ keyType=%d -> %@", d, u, kt, ret);
+                    }
+                } @catch (NSException *e) {
+                    qqlog(@"[pskey] %@ uin%@ kt%d 异常 %@", d, u, kt, e);
+                }
+            }
+        }
+    }
+
+    // skey
+    @try {
+        id skey = ((id (*)(id, SEL))objc_msgSend)(mgr, NSSelectorFromString(@"getRealSig_SKEYStr"));
+        if (skey) qqlog(@"[pskey] SKEY = %@", skey);
+    } @catch (NSException *e) {
+        qqlog(@"[pskey] SKEY 异常 %@", e);
+    }
+}
+
 // ── 枚举关键类的方法列表（只读）──
 static void dumpKeyClassMethods(void) {
     NSArray *keyClasses = @[
@@ -292,10 +339,11 @@ static void dumpKeyClassMethods(void) {
         _captureEnabled = !_captureEnabled;
         qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
         if (_captureEnabled) {
-            // 开始抓包：先枚举类 + dump cookie + 关键类方法，再开始记录
+            // 开始抓包：枚举类 + dump cookie + 关键类方法 + 直接拿 p_skey
             dumpObjCClasses();
             dumpWebKitCookies();
             dumpKeyClassMethods();
+            dumpPSKeys();
         }
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"

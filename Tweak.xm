@@ -175,6 +175,39 @@ static void dumpObjCClasses(void) {
     }
 }
 
+// ── 枚举关键类的方法列表（只读）──
+static void dumpKeyClassMethods(void) {
+    NSArray *keyClasses = @[
+        @"QQLoginPSKeyManager", @"QQLoginPSKeyDataSource", @"QQLoginPSKeyRefreshItem",
+        @"QQKuiklyHTTPRequestItem", @"QQKuiklySSORequestItem", @"QQKuiklyBaseRequestItem",
+        @"QQWebSSoSession", @"QQHttpClient", @"QQHttpClientSession", @"QQHttpClientSessionWrapper",
+        @"QQNetworkEngine", @"QQCRHttpRequest", @"QQWTLogin", @"QQLoginAccountKeyChainModel",
+        @"QQModelObject_tencent_im_oidb_lib_LoginSig", @"QQNetworkCommonImp",
+    ];
+    for (NSString *cn in keyClasses) {
+        Class cls = NSClassFromString(cn);
+        if (!cls) {
+            qqlog(@"[method] %@ 不存在", cn);
+            continue;
+        }
+        qqlog(@"[method] ==== %@ ====", cn);
+        // 类方法
+        unsigned int mc = 0;
+        Method *mets = class_copyMethodList(object_getClass(cls), &mc);
+        for (unsigned int i = 0; i < mc; i++) {
+            qqlog(@"[method] +[%@ %@]", cn, NSStringFromSelector(method_getName(mets[i])));
+        }
+        free(mets);
+        // 实例方法
+        unsigned int ic = 0;
+        Method *imets = class_copyMethodList(cls, &ic);
+        for (unsigned int i = 0; i < ic; i++) {
+            qqlog(@"[method] -[%@ %@]", cn, NSStringFromSelector(method_getName(imets[i])));
+        }
+        free(imets);
+    }
+}
+
 %hook UIApplication
 
 // ──────────────────────────────────────────
@@ -259,9 +292,10 @@ static void dumpObjCClasses(void) {
         _captureEnabled = !_captureEnabled;
         qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
         if (_captureEnabled) {
-            // 开始抓包：先枚举类 + dump cookie，再开始记录
+            // 开始抓包：先枚举类 + dump cookie + 关键类方法，再开始记录
             dumpObjCClasses();
             dumpWebKitCookies();
+            dumpKeyClassMethods();
         }
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"

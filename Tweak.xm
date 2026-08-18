@@ -134,6 +134,36 @@ static void dumpWebKitCookies(void) {
 
 %end
 
+// ── 枚举 ObjC 类（找网络桥接类，只读安全）──
+static void dumpObjCClasses(void) {
+    @try {
+        int total = objc_getClassList(NULL, 0);
+        Class *classes = (Class *)malloc(sizeof(Class) * total);
+        objc_getClassList(classes, total);
+        NSMutableArray *hits = [NSMutableArray array];
+        NSArray *keywords = @[@"http", @"Http", @"HTTP", @"Network", @"network", @"Request", @"request", @"Kuikly", @"kuikly", @"KRView", @"TBS", @"WebView", @"Cookie", @"cookie", @"Login", @"login", @"Session", @"session", @"Wup", @"wup", @"tiqq", @"levelTask", @"Level"];
+        for (int i = 0; i < total; i++) {
+            const char *name = class_getName(classes[i]);
+            if (!name) continue;
+            NSString *ns = [NSString stringWithUTF8String:name];
+            for (NSString *kw in keywords) {
+                if ([ns containsString:kw]) {
+                    [hits addObject:ns];
+                    break;
+                }
+            }
+        }
+        free(classes);
+        qqlog(@"[classes] 总类数 %d, 命中 %lu", total, (unsigned long)hits.count);
+        [hits sortUsingSelector:@selector(compare:)];
+        for (NSString *h in hits) {
+            qqlog(@"[class] %@", h);
+        }
+    } @catch (NSException *e) {
+        qqlog(@"[classes] 异常: %@", e);
+    }
+}
+
 %hook UIApplication
 
 // ──────────────────────────────────────────
@@ -143,6 +173,12 @@ static void dumpWebKitCookies(void) {
 - (void)_setupFloatBall {
     // 避免重复创建
     if (_floatBall) return;
+
+    // 枚举一次 ObjC 类（找网络桥接类）
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dumpObjCClasses();
+    });
 
     // ── 找活跃的 windowScene ──
     UIWindowScene *targetScene = nil;

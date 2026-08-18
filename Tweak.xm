@@ -49,11 +49,12 @@ static UIButton *_floatBall = nil;
     return self;
 }
 
-// 只让触摸命中悬浮球按钮，窗口其他区域穿透给 QQ
+// 只有触摸悬浮球区域才响应，其余一律穿透给 QQ
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self) return nil;   // 窗口本身不拦截触摸
-    return hit;                     // 按钮区域正常响应
+    if (_floatBall && CGRectContainsPoint(_floatBall.frame, point)) {
+        return _floatBall;
+    }
+    return nil;
 }
 
 @end

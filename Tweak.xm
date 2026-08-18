@@ -228,7 +228,7 @@ static void dumpPSKeys(void) {
 %hook QQKuiklyHTTPRequestItem
 - (void)setUrl:(NSString *)url {
     if (_captureEnabled) {
-        qqlog(@"[kuikly] HTTPRequest url=%@ domain=%@", url, [self valueForKey:@"domain"] ?: @"");
+        qqlog(@"[kuikly] HTTPRequest url=%@", url);
     }
     %orig;
 }

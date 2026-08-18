@@ -285,7 +285,10 @@ static BOOL shouldBlockNav(NSString *url) {
             }
             NSString *cur = (NSString *)r;
             if ([cur isEqualToString:@"about:blank"] || [cur hasPrefix:@"about:"]) {
-                qqlog(@"[autoClaim] 第%d次：about:blank，等待页面加载", attempt + 1);
+                qqlog(@"[autoClaim] 第%d次：about:blank，主动重新加载任务页", attempt + 1);
+                // 主动拉回任务页（QQ 清空页面后不再干等，直接 reload）
+                NSURL *tu = [NSURL URLWithString:@"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38"];
+                [strongSelf loadRequest:[NSURLRequest requestWithURL:tu]];
                 [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
                 return;
             }
@@ -317,6 +320,12 @@ static BOOL shouldBlockNav(NSString *url) {
         // 拦截一切离开等级页的跳转（Qsped 方案）：Kuikly/mqqapi/其他域一律拦，页面停留网页版
         if (shouldBlockNav(url)) {
             qqlog(@"[WKWebView] 拦截跳转: %@", url);
+            return nil;
+        }
+        // 拦截 about:blank 清空：QQ 跳 Kuikly 前先把页面清空（不走 setUrl，直接 loadRequest about:blank）
+        // 任务页状态下不允许清空，保持网页版任务中心
+        if ((url.length == 0 || [url isEqualToString:@"about:blank"]) && _inTaskCenter) {
+            qqlog(@"[WKWebView] 拦截about:blank清空（保持任务页）");
             return nil;
         }
         if (_captureEnabled && ([url containsString:@"ti.qq.com"] ||

@@ -243,74 +243,7 @@ static void dumpPSKeys(void) {
 }
 %end
 
-// ── 一键做任务：Get 列表 → 领奖可领取的 → 自动完成可做的 ──
-static void runLevelTasks(void) {
-    @try {
-        Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
-        if (!mgrCls) { qqlog(@"[task] QQLoginPSKeyManager 不存在"); return; }
-        id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance"));
-        if (!mgr) { qqlog(@"[task] sharedInstance 为空"); return; }
 
-        // 拿 ti 域 p_skey（keyType=1）
-        NSString *pskey = nil;
-        SEL sel = NSSelectorFromString(@"getLocalKeyOfDomain:uin:keyType:");
-        NSMethodSignature *sig = [mgr methodSignatureForSelector:sel];
-        if (!sig) { qqlog(@"[task] 无方法签名"); return; }
-        NSString *d = @"ti.qq.com";
-        NSString *u = @"583663742";
-        NSInteger kt = 1;
-        __unsafe_unretained NSString *dArg = d;
-        __unsafe_unretained NSString *uArg = u;
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:mgr];
-        [inv setSelector:sel];
-        [inv setArgument:&dArg atIndex:2];
-        [inv setArgument:&uArg atIndex:3];
-        [inv setArgument:&kt atIndex:4];
-        [inv invoke];
-        __unsafe_unretained id ret = nil;
-        [inv getReturnValue:&ret];
-        pskey = ret;
-        if (!pskey || pskey.length == 0) {
-            qqlog(@"[task] ti 域 p_skey 为空！");
-            return;
-        }
-        qqlog(@"[task] ti p_skey 获取成功");
-
-        // 用 NSURLSession 调 levelTask/Get（知识库格式）
-        NSInteger bkn = 0;
-        for (int i = 0; i < (int)pskey.length; i++) {
-            bkn = ((bkn << 5) + bkn + [pskey characterAtIndex:i]) & 0x7FFFFFFF;
-        }
-        NSString *urlStr = [NSString stringWithFormat:@"https://ti.qq.com/qqlevel/trpc/levelTask/Get?bkn=%ld", (long)bkn];
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-        req.HTTPMethod = @"POST";
-        req.HTTPBody = [@"{\"mode\":42}" dataUsingEncoding:NSUTF8StringEncoding];
-        NSString *uin = @"583663742";
-        NSString *skey = @"";
-        // 拿 skey
-        @try {
-            id s = ((id (*)(id, SEL))objc_msgSend)(mgr, NSSelectorFromString(@"getRealSig_SKEYStr"));
-            if (s) skey = s;
-        } @catch (NSException *e) {}
-        [req setValue:[NSString stringWithFormat:@"uin=o%@;skey=%@;p_uin=o%@;p_skey=%@", uin, skey, uin, pskey] forHTTPHeaderField:@"Cookie"];
-        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-        [req setValue:@"https://ti.qq.com" forHTTPHeaderField:@"Origin"];
-        [req setValue:@"https://ti.qq.com/qqlevel/index" forHTTPHeaderField:@"Referer"];
-        [req setValue:@"Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36 MQQBrowser/6.2 TBS/047903" forHTTPHeaderField:@"User-Agent"];
-
-        qqlog(@"[task] 调 levelTask/Get ...");
-        [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            if (error) { qqlog(@"[task] Get 失败: %@", error.localizedDescription); return; }
-            NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            qqlog(@"[task] Get 响应 %ldB: %@", (long)data.length, [body substringToIndex:MIN(300, body.length)]);
-        }] resume];
-    } @catch (NSException *e) {
-        qqlog(@"[task] 异常: %@", e);
-    }
-}
-
-// ── 枚举关键类的方法列表（只读）──
 static void dumpKeyClassMethods(void) {
     NSArray *keyClasses = @[
         @"QQLoginPSKeyManager", @"QQLoginPSKeyDataSource", @"QQLoginPSKeyRefreshItem",

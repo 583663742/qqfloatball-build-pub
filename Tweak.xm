@@ -38,15 +38,6 @@ static void qqlog(NSString *fmt, ...) {
 - (void)_floatBallPanned:(UIPanGestureRecognizer *)pan;
 @end
 
-// ── 前向声明 QQ 内置浏览器类（编译期不引入 QQ 头文件）──
-@class QQWebViewController;
-
-@interface QQWebViewController (QQFBHooks)
-- (void)loadRequest:(NSURLRequest *)request;
-- (void)setUrl:(NSString *)url;
-- (void)executeJsScript:(NSString *)script completionHandler:(void (^)(id _Nullable, NSError * _Nullable))completionHandler;
-@end
-
 %hook UIApplication
 - (BOOL)setDelegate:(id)delegate {
     BOOL result = %orig(delegate);
@@ -230,13 +221,16 @@ static BOOL isTaskCenterPage(NSString *url) {
         qqlog(@"[QQWebVC] loadRequest: %@", url);
         if (isTaskCenterPage(url)) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self executeJsScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
+                // 动态调用 executeJsScript:completionHandler:（避免 forward declaration 编译错误）
+                SEL jsSel = NSSelectorFromString(@"executeJsScript:completionHandler:");
+                void (^handler)(id, NSError *) = ^(id result, NSError *error) {
                     if (error) {
                         qqlog(@"[autoClaim] QQWebVC 注入失败: %@", error.localizedDescription);
                     } else {
                         qqlog(@"[autoClaim] QQWebVC 已注入自动领取脚本");
                     }
-                }];
+                };
+                ((void (*)(id, SEL, id, id))objc_msgSend)(self, jsSel, autoClaimScript(), handler);
             });
         }
     } @catch (NSException *e) {}

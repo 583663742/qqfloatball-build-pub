@@ -202,10 +202,43 @@ static BOOL isTaskCenterPage(NSString *url) {
 
 // hook evaluateJavaScript 记录
 - (void)evaluateJavaScript:(NSString *)script completionHandler:(void (^)(id, NSError *))completionHandler {
-    if (_captureEnabled && [script length] > 0 && [script length] < 200) {
-        qqlog(@"[WKWebView] eval: %@", [script substringToIndex:MIN(100, script.length)]);
-    }
-    %orig(script, completionHandler);
+    @try {
+        if (_captureEnabled && [script length] > 0 && [script length] < 200) {
+            qqlog(@"[WKWebView] eval: %@", [script substringToIndex:MIN(100, script.length)]);
+        }
+    } @catch (NSException *e) {}
+    return %orig(script, completionHandler);
+}
+
+%end
+
+// ── 复用 QQ 内置浏览器：QQWebViewController hook（双保险注入）──
+%hook QQWebViewController
+
+- (void)loadRequest:(NSURLRequest *)request {
+    @try {
+        NSString *url = request.URL.absoluteString ?: @"";
+        qqlog(@"[QQWebVC] loadRequest: %@", url);
+        if (isTaskCenterPage(url)) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self executeJsScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
+                    if (error) {
+                        qqlog(@"[autoClaim] QQWebVC 注入失败: %@", error.localizedDescription);
+                    } else {
+                        qqlog(@"[autoClaim] QQWebVC 已注入自动领取脚本");
+                    }
+                }];
+            });
+        }
+    } @catch (NSException *e) {}
+    %orig(request);
+}
+
+- (void)setUrl:(NSString *)url {
+    @try {
+        qqlog(@"[QQWebVC] setUrl: %@", url ?: @"");
+    } @catch (NSException *e) {}
+    return %orig(url);
 }
 
 %end
@@ -414,38 +447,58 @@ static void dumpKeyClassMethods(void) {
 // ── 打开等级页面 WebView（带自动注入领取脚本）──
 static void openTaskCenterWebView(void) {
     @try {
-        WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-        config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
-        WKWebView *webView = [[WKWebView alloc] initWithFrame:[UIScreen mainScreen].bounds configuration:config];
+        Class cls = NSClassFromString(@"QQWebViewController");
+        if (!cls) { qqlog(@"[openTaskCenter] QQWebViewController 不存在"); return; }
+        NSString *urlStr = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
 
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.view = webView;
-        vc.title = @"QQ等级任务中心";
+        id vc = nil;
+        // 创建 QQ 内置浏览器控制器（自带 _r 桥 + 登录 cookie 注入）
+        SEL initSel = NSSelectorFromString(@"initWith:forStyle:");
+        NSMethodSignature *sig = [cls instanceMethodSignatureForSelector:initSel];
+        if (sig && [sig numberOfArguments] >= 4) {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            id alloc = [cls alloc];
+            [inv setTarget:alloc];
+            [inv setSelector:initSel];
+            __unsafe_unretained NSString *urlArg = urlStr;
+            [inv setArgument:&urlArg atIndex:2];
+            const char *t3 = [sig getArgumentTypeAtIndex:3];
+            qqlog(@"[openTaskCenter] initWith:forStyle: arg3 type=%s", t3);
+            if (t3[0] == '@') {
+                __unsafe_unretained id styleArg = @(0);
+                [inv setArgument:&styleArg atIndex:3];
+            } else {
+                NSInteger style = 0;
+                [inv setArgument:&style atIndex:3];
+            }
+            [inv invoke];
+            __unsafe_unretained id ret = nil;
+            [inv getReturnValue:&ret];
+            vc = ret;
+        }
+        if (!vc) { qqlog(@"[openTaskCenter] 创建 QQWebViewController 失败"); return; }
+        qqlog(@"[openTaskCenter] 已创建 QQWebViewController: %@", vc);
 
-        // 加载等级页（带参数避免重定向）
-        NSURL *url = [NSURL URLWithString:@"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38"];
-        NSURLRequest *req = [NSURLRequest requestWithURL:url];
-        [webView loadRequest:req];
-        qqlog(@"[openTaskCenter] 加载等级页: %@", url.absoluteString);
-
-        // 呈现模态导航
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-        UIViewController *presenter = _floatWindow.rootViewController;
-        if (presenter && !presenter.presentedViewController) {
-            [presenter presentViewController:nav animated:YES completion:nil];
-        } else {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *ws = (UIWindowScene *)scene;
-                    if (ws.activationState == UISceneActivationStateForegroundActive) {
-                        UIViewController *rootVC = ws.windows.firstObject.rootViewController;
-                        if (rootVC) {
-                            [rootVC presentViewController:nav animated:YES completion:nil];
-                            break;
-                        }
-                    }
+        // push 到 QQ 根导航（QQ 的 tabBar 内）
+        BOOL pushed = NO;
+        SEL rootSel = NSSelectorFromString(@"rootTabBarController");
+        if ([cls respondsToSelector:rootSel]) {
+            id tabBar = ((id (*)(id, SEL))objc_msgSend)(cls, rootSel);
+            if ([tabBar respondsToSelector:NSSelectorFromString(@"selectedViewController")]) {
+                id selVC = [tabBar selectedViewController];
+                if ([selVC isKindOfClass:[UINavigationController class]]) {
+                    [(UINavigationController *)selVC pushViewController:(UIViewController *)vc animated:YES];
+                    qqlog(@"[openTaskCenter] push 到 QQ 导航成功");
+                    pushed = YES;
                 }
             }
+        }
+        if (!pushed) {
+            // 兜底：悬浮窗 present
+            UIViewController *presenter = _floatWindow.rootViewController;
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:(UIViewController *)vc];
+            [presenter presentViewController:nav animated:YES completion:nil];
+            qqlog(@"[openTaskCenter] present 兜底");
         }
     } @catch (NSException *e) {
         qqlog(@"[openTaskCenter] 异常: %@", e);

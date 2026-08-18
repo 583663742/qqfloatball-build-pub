@@ -54,6 +54,28 @@ static void qqlog(NSString *fmt, ...) {
     }
 }
 
+// ── 异步日志（抓包用）：不阻塞调用线程（NSURLSession 回调/主线程都可能调用）──
+static void qqlogAsync(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        @try {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
+            if (!fh) {
+                [[NSFileManager defaultManager] createFileAtPath:qqlogPath() contents:nil attributes:nil];
+                fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
+            }
+            if (fh) {
+                [fh seekToEndOfFile];
+                [fh writeData:[[msg stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+                [fh closeFile];
+            }
+        } @catch (NSException *e) {}
+    });
+}
+
 // ── 提前声明 %new 方法，供 dispatch_once block 内调用 ──
 @interface UIApplication (QQFloatBall)
 - (void)_setupFloatBall;
@@ -118,13 +140,15 @@ static void qqlog(NSString *fmt, ...) {
     @try {
         if (_captureEnabled) {
             NSString *url = request.URL.absoluteString ?: @"";
-            // 只记录等级相关域，避免日志被 QQ 其他请求刷爆
-            BOOL relevant = ([url containsString:@"ti.qq.com"]
-                          || [url containsString:@"qqlevel"]
+            // 只记录等级相关关键词请求（收窄！避免 club.vip.qq.com 等宽域刷爆+拖慢页面）
+            // 注意：无关请求完全不包装 completionHandler，零干预 QQ 页面加载
+            BOOL relevant = ([url containsString:@"qqlevel"]
                           || [url containsString:@"tianxuan"]
-                          || [url containsString:@"openKuikly"]
-                          || [url containsString:@"club.vip.qq.com"]
-                          || [url containsString:@"h5.vip.qq.com"]);
+                          || [url containsString:@"commdeliver"]
+                          || [url containsString:@"levelTask"]
+                          || [url containsString:@"ExecAct"]
+                          || [url containsString:@"GetUserRecord"]
+                          || [url containsString:@"openKuikly"]);
             if (relevant) {
                 NSString *body = @"";
                 if (request.HTTPBody.length > 0) {
@@ -132,16 +156,16 @@ static void qqlog(NSString *fmt, ...) {
                     if (!body) body = [request.HTTPBody description];
                     if (body.length > 500) body = [body substringToIndex:500];
                 }
-                qqlog(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url, body);
-                // 记录响应（异步包装）
+                qqlogAsync(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url, body);
+                // 记录响应（异步包装）——只对关键接口记录，避免拖慢
                 void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                     @try {
                         if (data.length > 0) {
                             NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
                             if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
-                            qqlog(@"[NSURLSession]  ← RESP %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, respStr);
+                            qqlogAsync(@"[NSURLSession]  ← RESP %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, respStr);
                         } else if (err) {
-                            qqlog(@"[NSURLSession]  ← ERR %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, err.localizedDescription);
+                            qqlogAsync(@"[NSURLSession]  ← ERR %@ : %@", url.length > 100 ? [url substringToIndex:100] : url, err.localizedDescription);
                         }
                     } @catch (NSException *e) {}
                     if (completionHandler) completionHandler(data, resp, err);

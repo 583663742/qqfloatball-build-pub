@@ -10,7 +10,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = QQFloatBall
 
 QQFloatBall_FILES = Tweak.xm
-QQFloatBall_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations
-QQFloatBall_LDFLAGS = -Wl,-fixup_chains -framework CydiaSubstrate -F"$(THEOS_VENDOR_LIBRARY_PATH)/iphone/roothide" -lroothide
+QQFloatBall_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations -fno-modules -nostdinc++ -isystem $(THEOS_SDK_PATH)/usr/include/c++/v1 -Wno-arc-retain-cycles
+QQFloatBall_LDFLAGS = -Wl,-fixup_chains -framework CydiaSubstrate -F"$(THEOS_VENDOR_LIBRARY_PATH)/iphone/roothide" -lroothide -fuse-ld=lld
 
 include $(THEOS_MAKE_PATH)/tweak.mk

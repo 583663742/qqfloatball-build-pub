@@ -423,8 +423,9 @@ static NSArray *fetchTaskList(NSString *uin, NSString *tiPskey, int *retCodeOut)
 }
 
 // ── ExecAct 领奖（act.qzone.qq.com 真身域名）──
+//   2026-08-19 用户定案：任务满足条件自动完成，无需点击领取 → 本函数暂不调用（保留供后续"怎么做"）
 //   普通任务 body：{SubActId, ClientPlat, Aid, EnteranceId, ActReqData}
-static BOOL execActClaim(NSDictionary *task, NSString *uin, NSString *qzonePskey) {
+__attribute__((unused)) static BOOL execActClaim(NSDictionary *task, NSString *uin, NSString *qzonePskey) {
     @try {
         NSString *awardRuleId = task[@"award_rule_id"] ?: @"";
         NSString *taskId = task[@"task_id"] ?: @"";
@@ -469,7 +470,8 @@ static BOOL execActClaim(NSDictionary *task, NSString *uin, NSString *qzonePskey
 }
 
 // ── 福利社领券完整链：GetBenefitsDetail → ExecAct → GetUserItemsByBenefits ──
-static BOOL benefitClaimChain(NSString *uin, NSString *vipPskey) {
+//   2026-08-19 用户定案：任务满足条件自动完成 → 本函数暂不调用（保留供后续"怎么做"）
+__attribute__((unused)) static BOOL benefitClaimChain(NSString *uin, NSString *vipPskey) {
     @try {
         int gtk = hash33(vipPskey);
         NSString *cookie = [NSString stringWithFormat:@"uin=%@; p_uin=%@; p_skey=%@", uin, uin, vipPskey];
@@ -530,37 +532,73 @@ static BOOL benefitClaimChain(NSString *uin, NSString *vipPskey) {
     return NO;
 }
 
-// ── 一键做任务主流程（后台队列执行，不阻塞 UI）──
+// ── 一键任务主流程（检测界面 → 检查任务状态 → 分类汇报；不做自动执行）──
+//   2026-08-19 用户定案：任务满足完成条件即自动完成，不存在"点击领取"。
+//   一键任务 = ①检测当前是否在任务页面 ②检查任务做了多少/哪些已完成/哪些不能做/哪些没做
 static void runAutoTasks(void) {
     if (_taskRunning) {
-        qqlog(@"[auto] 任务已在运行中");
+        qqlog(@"[auto] 检查已在运行中");
         return;
     }
     _taskRunning = YES;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            qqlog(@"\n========== 一键做任务开始 ==========");
-            // 1. 取 uin + 各域 p_skey
+            qqlog(@"\n========== 一键任务检查开始 ==========");
+
+            // ══ ① 检测当前界面是否在做任务的页面（等级页/福利社页 = Kuikly 渲染）══
+            __block BOOL inTaskPage = NO;
+            __block NSString *pageDesc = @"无法获取";
+            dispatch_semaphore_t pageSem = dispatch_semaphore_create(0);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    id topVC = nil;
+                    Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
+                    if (utilCls && [utilCls respondsToSelector:@selector(topMostViewController)]) {
+                        topVC = [utilCls topMostViewController];
+                    }
+                    if (!topVC) {
+                        // 兜底：走 keyWindow rootViewController
+                        UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
+                        if (keyWin) topVC = keyWin.rootViewController;
+                        while (topVC && topVC.presentedViewController) topVC = topVC.presentedViewController;
+                    }
+                    if (topVC) {
+                        Class kuiklyCls = NSClassFromString(@"QQKuiklyViewController");
+                        if (kuiklyCls && [topVC isKindOfClass:kuiklyCls]) {
+                            NSString *page = [topVC valueForKey:@"pageName"];
+                            inTaskPage = YES;
+                            pageDesc = [NSString stringWithFormat:@"✅ 任务页面（Kuikly pageName=%@）", page ?: @"?"];
+                        } else {
+                            pageDesc = [NSString stringWithFormat:@"⚠️ 非任务页面（当前 VC=%@）", NSStringFromClass([topVC class])];
+                        }
+                    }
+                } @catch (NSException *e) {
+                    pageDesc = [NSString stringWithFormat:@"⚠️ 页面检测异常: %@", e.reason];
+                }
+                dispatch_semaphore_signal(pageSem);
+            });
+            dispatch_semaphore_wait(pageSem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+            qqlog(@"[界面] %@", pageDesc);
+
+            if (!inTaskPage) {
+                qqlog(@"[界面] 自动跳转等级页…");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSURL *url = [NSURL URLWithString:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=aHR0cHM6Ly90aS5xcS5jb20vcXFsZXZlbC9pbmRleD92ZXJzaW9uPTEmdGFiPTYmc291cmNlPTE1"];
+                    if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+                });
+            }
+
+            // ══ ② 取 uin + ti 域 p_skey（拉任务列表用）══
             NSString *uin = getCurrentUin();
             NSString *tiPskey = getPskey(@"ti.qq.com", uin, 1);
+            if (!tiPskey) tiPskey = getPskey(@"ti.qq.com", uin, 0);
             if (!tiPskey) {
-                // fallback keyType=0
-                tiPskey = getPskey(@"ti.qq.com", uin, 0);
-            }
-            if (!tiPskey) {
-                qqlog(@"[auto] ✗ 拿不到 ti 域 p_skey，无法继续");
+                qqlog(@"[auto] ✗ 拿不到 ti 域 p_skey，无法检查任务");
                 _taskRunning = NO;
                 return;
             }
-            NSString *qzonePskey = getPskey(@"qzone.qq.com", uin, 1);
-            NSString *vipPskey = getPskey(@"vip.qq.com", uin, 1);
-            if (!qzonePskey) qzonePskey = getPskey(@"qzone.qq.com", uin, 0);
-            if (!vipPskey) vipPskey = getPskey(@"vip.qq.com", uin, 0);
-            qqlog(@"[auto] uin=%@ ti_p_skey_len=%lu qzone_p_skey_len=%lu vip_p_skey_len=%lu",
-                  uin, (unsigned long)tiPskey.length,
-                  (unsigned long)qzonePskey.length, (unsigned long)vipPskey.length);
 
-            // 2. 拉任务列表
+            // ══ ③ 拉任务列表 ══
             int retCode = 0;
             NSArray *taskList = fetchTaskList(uin, tiPskey, &retCode);
             if (!taskList || taskList.count == 0) {
@@ -569,47 +607,47 @@ static void runAutoTasks(void) {
                 return;
             }
 
-            // 3. 遍历任务执行
-            int claimOK = 0, claimFail = 0, pending = 0, done = 0;
+            // ══ ④ 分类检查：已完成 / 未完成 / 不能做 ══
+            int doneCnt = 0, todoCnt = 0, cannotCnt = 0, unknownCnt = 0;
             for (NSDictionary *task in taskList) {
                 if (![task isKindOfClass:[NSDictionary class]]) continue;
                 NSString *title = task[@"title"] ?: task[@"task_name"] ?: @"?";
                 NSNumber *statusNum = task[@"status"];
                 int status = statusNum ? [statusNum intValue] : -1;
-                NSString *taskId = [task[@"task_id"] description] ?: @"";
-                qqlog(@"[task] id=%@ title=%@ status=%d", taskId, title, status);
+                NSString *buttonText = task[@"button_text"] ?: @"";
+                NSString *extendStr = task[@"extend"] ?: @"";
+                NSString *jump = task[@"jump_schema"] ?: @"";
 
-                if (status == 2) {  // 可领取
-                    qqlog(@"[task] 🎁 可领取 → 尝试领奖: %@", title);
-                    BOOL ok = NO;
-                    // 福利社任务特判
-                    BOOL isBenefit = [title containsString:@"福利社"] || [title containsString:@"领券"] ||
-                        ([task[@"award_rule_id"] isKindOfClass:[NSString class]] &&
-                         [(NSString *)task[@"award_rule_id"] containsString:@"139705"]);
-                    if (isBenefit) {
-                        ok = benefitClaimChain(uin, vipPskey ?: qzonePskey);
-                    } else {
-                        ok = execActClaim(task, uin, qzonePskey ?: tiPskey);
-                    }
-                    if (ok) claimOK++; else claimFail++;
-                    qqlog(@"[task] %@ %@", title, ok ? @"✅ 领奖成功" : @"❌ 领奖失败");
-                } else if (status == 1) {  // 已完成未领
-                    qqlog(@"[task] ⏳ 已完成未领 → 尝试领奖: %@", title);
-                    BOOL ok = execActClaim(task, uin, qzonePskey ?: tiPskey);
-                    if (ok) claimOK++; else claimFail++;
-                    qqlog(@"[task] %@ %@", title, ok ? @"✅ 领奖成功" : @"❌ 领奖失败");
-                } else if (status == 0) {  // 未完成
-                    pending++;
-                    qqlog(@"[task] 📋 未完成（需手动/UI 操作）: %@", title);
-                } else if (status == 3) {  // 已领取
-                    done++;
-                    qqlog(@"[task] ✅ 已领取: %@", title);
+                // 不能做判定：按钮文案含开通/充值/购买/升级/需会员 等门槛词；或扩展标记审核隐藏
+                BOOL isBlocked = NO;
+                if ([buttonText containsString:@"开通"] || [buttonText containsString:@"充值"] ||
+                    [buttonText containsString:@"购买"] || [buttonText containsString:@"升级"] ||
+                    [buttonText containsString:@"会员"] || [buttonText containsString:@"需"] ||
+                    [extendStr containsString:@"is_ios_review_hide"] || [extendStr containsString:@"\"hide\":true"]) {
+                    isBlocked = YES;
+                }
+
+                if (isBlocked) {
+                    cannotCnt++;
+                    qqlog(@"[task] ⛔ 不能做: %@ (按钮:%@)", title, buttonText);
+                } else if (status == 0 || status == -1) {
+                    todoCnt++;
+                    qqlog(@"[task] 📋 未做: %@ (按钮:%@%@)", title, buttonText,
+                          jump.length > 0 ? [NSString stringWithFormat:@" 跳转:%@", jump] : @"");
+                } else if (status >= 1) {
+                    doneCnt++;
+                    qqlog(@"[task] ✅ 已完成: %@ (status=%d)", title, status);
+                } else {
+                    unknownCnt++;
+                    qqlog(@"[task] ❓ 状态未知: %@ (status=%d)", title, status);
                 }
             }
 
-            // 4. 汇总
-            qqlog(@"[auto] ══ 汇总: 领奖成功=%d 失败=%d 未完成=%d 已领取=%d ══", claimOK, claimFail, pending, done);
-            qqlog(@"[auto] 未完成任务需要打开等级页手动操作，完成后再次点「一键做任务」即可领奖");
+            // ══ ⑤ 汇总 ══
+            qqlog(@"[auto] ══ 汇总: 已完成=%d 未做=%d 不能做=%d 未知=%d ══", doneCnt, todoCnt, cannotCnt, unknownCnt);
+            if (todoCnt > 0) {
+                qqlog(@"[auto] 未做任务可打开等级页手动完成（满足条件自动到账，无需领取）");
+            }
         } @catch (NSException *e) {
             qqlog(@"[auto] 主流程异常: %@", e);
         }
@@ -881,14 +919,14 @@ static void dumpPSKeys(void) {
             dumpPSKeys();
         }
     }]];
-    // 一键做任务：HTTP 直连领奖（不再依赖 WebView）
-    [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键做任务"
+    // 一键任务：检测界面 + 检查任务状态（2026-08-19 用户定案：不做自动执行，先检查汇报）
+    [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键任务"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        qqlog(@"[action] 一键做任务启动");
+        qqlog(@"[action] 一键任务启动");
         [self _closeLogPanel:nil];
         showLogPanel();
-        appendLogView(@"⚡ 一键做任务启动…");
+        appendLogView(@"⚡ 一键任务：检测界面+检查任务…");
         runAutoTasks();
         // 日志面板轮询刷新（从任务启动时的文件偏移读起）
         NSInteger startOffset = [[[NSFileManager defaultManager] attributesOfItemAtPath:qqlogPath() error:nil][NSFileSize] longValue] ?: 0;
@@ -913,9 +951,9 @@ static void dumpPSKeys(void) {
                 [NSThread sleepForTimeInterval:0.5];
             }
             if (_taskRunning) {
-                appendLogView(@"⏳ 任务仍在进行（可稍后再点一次）");
+                appendLogView(@"⏳ 检查仍在进行（可稍后再点一次）");
             } else {
-                appendLogView(@"✅ 任务执行完毕");
+                appendLogView(@"✅ 任务检查完毕");
             }
         });
     }]];

@@ -793,6 +793,31 @@ static void dumpPSKeys(void) {
     floatWindow.windowScene = targetScene;
     floatWindow.rootViewController = [UIViewController new];
 
+    // ── 方案B：挂靠 QQ 顶层悬浮窗体系（2026-08-19 头文件实锤）──
+    //    QQ 9.3.35 有 QQFloatingWindowTopLevelWindowManager（032238），
+    //    它统一管理所有悬浮窗层级并随时 refreshWindowLevel。
+    //    我们自建窗口若不走这套体系，QQ 一有浮层（来电窗/游戏浮窗/小助手浮窗）
+    //    就会盖住我们 → "点了没反应"。
+    //    acquireTopLevelWindowHighLevel: 把自己的窗口申请到 QQ 的顶层，
+    //    层级永远跟 QQ 走，不打架。类不存在时静默跳过（兼容旧版本）。
+    @try {
+        Class topWinMgr = NSClassFromString(@"QQFloatingWindowTopLevelWindowManager");
+        if (topWinMgr && [topWinMgr respondsToSelector:@selector(acquireTopLevelWindowHighLevel:)]) {
+            [topWinMgr acquireTopLevelWindowHighLevel:floatWindow];
+            // 双保险：参照 QQ 顶层窗口的实际 windowLevel，把我们的窗口提到它之上。
+            // 不能 addSubview 嵌套 window（会破坏事件路由），只能比层级。
+            double targetLevel = UIWindowLevelAlert + 1;   // 兜底 2001
+            id topWin = [topWinMgr topLevelWindow];
+            if (topWin && [topWin isKindOfClass:[UIWindow class]]) {
+                double lv = [(UIWindow *)topWin windowLevel];
+                if (lv > 0) targetLevel = lv + 1;
+            }
+            floatWindow.windowLevel = targetLevel;
+        }
+    } @catch (NSException *e) {
+        // QQ 内部实现变化时静默降级为独立窗口
+    }
+
     // ── 悬浮按钮 ──
     CGFloat ballSize = 45.0;
     UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];

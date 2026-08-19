@@ -2,6 +2,15 @@
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
 
+// ── QQ 9.3.35 顶层悬浮窗管理器私有接口（头文件 032238 实锤）──
+//    声明后编译器认识这些 selector（ObjC++ 下向 id 调未声明 selector 会报 error）
+@interface QQFloatingWindowTopLevelWindowManager : NSObject
++ (id)sharedManager;
++ (id)topLevelWindow;
++ (void)acquireTopLevelWindowHighLevel:(id)arg1;
++ (void)releaseTopLevelWindowHighLevel:(id)arg1;
+@end
+
 // ── 持有悬浮球窗口和按钮的强引用，防止 ARC 释放 ──
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
@@ -801,9 +810,8 @@ static void dumpPSKeys(void) {
     //    acquireTopLevelWindowHighLevel: 把自己的窗口申请到 QQ 的顶层，
     //    层级永远跟 QQ 走，不打架。类不存在时静默跳过（兼容旧版本）。
     @try {
-        // 声明为 id（不要 Class）：id 可调任意 selector，Class 变量调方法编译器
-        // 会报 "no known class/instance method"（2026-08-19 CI 实锤两次）
-        id topWinMgr = (id)NSClassFromString(@"QQFloatingWindowTopLevelWindowManager");
+        // 声明为 Class + 已声明私有接口，编译器认得 selector；类不存在时静默降级
+        Class topWinMgr = NSClassFromString(@"QQFloatingWindowTopLevelWindowManager");
         if (topWinMgr && [topWinMgr respondsToSelector:@selector(acquireTopLevelWindowHighLevel:)]) {
             [topWinMgr acquireTopLevelWindowHighLevel:floatWindow];
             // 双保险：参照 QQ 顶层窗口的实际 windowLevel，把我们的窗口提到它之上。

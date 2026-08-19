@@ -102,7 +102,9 @@ static BOOL isLevelKeyURL(NSString *url) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.windowLevel = UIWindowLevelStatusBar + 1;
+        // ⚠️ 层级必须足够高：QQ 9.3.35 有高浮层窗口（来电/游戏浮窗等），statusBar+1 会被盖住点不到
+        // 用 statusBar+10，仍低于系统 alert（2000），不会挡住系统弹窗
+        self.windowLevel = UIWindowLevelStatusBar + 10;
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = YES;
         self.hidden = NO;
@@ -110,13 +112,16 @@ static BOOL isLevelKeyURL(NSString *url) {
     return self;
 }
 
-// 只有触摸悬浮球区域（或日志面板）才响应，其余一律穿透给 QQ
+// 只有触摸悬浮球区域（或日志面板及其子控件）才响应，其余一律穿透给 QQ
+// ⚠️ 必须返回真正的子视图：日志面板内的关闭按钮是 _logView 的子视图，
+//    若直接 return _logView（父视图），按钮永远收不到 touch（点了没反应）
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (_floatBall && CGRectContainsPoint(_floatBall.frame, point)) {
         return _floatBall;
     }
     if (_logView && !_logView.hidden && CGRectContainsPoint(_logView.frame, point)) {
-        return _logView;
+        // 走 super 递归找出最深的命中的子视图（关闭按钮/文本框），保证按钮可点
+        return [super hitTest:point withEvent:event];
     }
     return nil;
 }
@@ -159,7 +164,101 @@ static BOOL isLevelKeyURL(NSString *url) {
 
 %end
 
-// ── Cookie 枚举：读 WKWebView 的 cookie store（含 httpOnly p_skey）──
+// ──────────────────────────────────────────
+//  网络抓包补全（2026-08-19）：原来只 hook 了 dataTaskWithRequest:completionHandler:
+//  一个方法，QQ 9.3.35 大量请求走其它入口（Kuikly 的 KRHttpRequestTool、
+//  QQ 自研 QQCRHttpRequest、NSURLSession 无 handler 变体、uploadTask 等）→ 抓包不全。
+//  补全后：NSURLSession 3 个变体 + KRHttpRequestTool + QQCRHttpRequest setRequestUrl
+// ──────────────────────────────────────────
+%hook NSURLSession
+
+// 无 completionHandler 变体（GET 常见）
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    @try {
+        if (_captureEnabled) {
+            NSString *url = request.URL.absoluteString ?: @"";
+            if (isLevelKeyURL(url)) {
+                qqlogAsync(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", url);
+            } else if (!_captureOnlyTasks) {
+                qqlogAsync(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", url);
+            }
+        }
+    } @catch (NSException *e) {}
+    return %orig(request);
+}
+
+// URL 直接变体
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    @try {
+        if (_captureEnabled) {
+            NSString *u = url.absoluteString ?: @"";
+            if (isLevelKeyURL(u)) {
+                qqlogAsync(@"[NSURLSession] GET %@", u);
+            } else if (!_captureOnlyTasks) {
+                qqlogAsync(@"[NSURLSession] GET %@", u);
+            }
+        }
+    } @catch (NSException *e) {}
+    return %orig(url, completionHandler);
+}
+
+// uploadTask 变体（POST body）
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    @try {
+        if (_captureEnabled) {
+            NSString *url = request.URL.absoluteString ?: @"";
+            if (isLevelKeyURL(url)) {
+                NSString *body = bodyData ? [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding] : @"";
+                qqlogAsync(@"[NSURLSession] upload %@ %@ body=%@", request.HTTPMethod ?: @"POST", url, body);
+            } else if (!_captureOnlyTasks) {
+                qqlogAsync(@"[NSURLSession] upload %@ %@", request.HTTPMethod ?: @"POST", url);
+            }
+        }
+    } @catch (NSException *e) {}
+    return %orig(request, bodyData, completionHandler);
+}
+
+%end
+
+// Kuikly 网络请求工具（头文件 019328_KRHttpRequestTool.h 实锤：等级页/福利页 Kuikly 渲染走这里）
+%hook KRHttpRequestTool
+
++ (void)requestWithMethod:(id)method url:(id)url param:(id)param headers:(id)headers timeout:(float)timeout cookie:(id)cookie responseBlock:(id)responseBlock {
+    @try {
+        if (_captureEnabled) {
+            NSString *u = [url isKindOfClass:[NSString class]] ? url : @"";
+            if (isLevelKeyURL(u)) {
+                NSString *m = [method isKindOfClass:[NSString class]] ? method : @"GET";
+                NSString *p = param ? [NSString stringWithFormat:@"%@", param] : @"";
+                qqlogAsync(@"[KRHttp] %@ %@ param=%@", m, u, p.length > 500 ? [p substringToIndex:500] : p);
+            } else if (!_captureOnlyTasks) {
+                qqlogAsync(@"[KRHttp] %@ %@", method ?: @"GET", u);
+            }
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+%end
+
+// QQ 自研 CR 网络栈（头文件 023306_QQCRHttpRequest.h：requestUrl/requestType/requestBody 属性）
+%hook QQCRHttpRequest
+
+- (void)setRequestUrl:(NSString *)requestUrl {
+    @try {
+        if (_captureEnabled) {
+            NSString *u = requestUrl ?: @"";
+            if (isLevelKeyURL(u)) {
+                qqlogAsync(@"[QQCR] setRequestUrl=%@", u);
+            } else if (!_captureOnlyTasks) {
+                qqlogAsync(@"[QQCR] setRequestUrl=%@", u);
+            }
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+%end
 static void dumpWebKitCookies(void) {
     @try {
         Class wdsClass = NSClassFromString(@"WKWebsiteDataStore");
@@ -689,6 +788,9 @@ static void dumpPSKeys(void) {
     // ── 创建独立窗口（强引用持有，避免被释放）──
     CGRect screenBounds = targetScene.screen.bounds;
     QQFloatBallWindow *floatWindow = [[QQFloatBallWindow alloc] initWithFrame:screenBounds];
+    // ⚠️ iOS 13+ 必须关联 windowScene！否则 UIWindow 不参与 hitTest/触摸路由，
+    //    表现为"球看得见但点了没反应"（2026-08-19 实锤根因）
+    floatWindow.windowScene = targetScene;
     floatWindow.rootViewController = [UIViewController new];
 
     // ── 悬浮按钮 ──

@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# usage: deploy.exp <ip> <deb_path>
+set timeout 60
+set ip [lindex $argv 0]
+set deb [lindex $argv 1]
+if {$ip eq ""} { set ip "100.84.151.126" }
+if {$deb eq ""} { set deb "D:/QQFloatBall-ci/artifact/packages/com.example.qqfloatball_1.0.0_iphoneos-arm64e.deb" }
+
+# 1. scp deb -> /tmp/
+spawn scp -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=10 "$deb" "root@$ip:/tmp/qqfloatball.deb"
+expect {
+    "password:" { send "alpine\r" }
+    timeout { puts "scp timeout"; exit 2 }
+    eof { puts "scp no prompt"; }
+}
+expect eof
+puts "\n=== scp done, installing ==="
+
+# 2. ssh: dpkg -i + killall QQ
+spawn ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=10 root@$ip "dpkg -i /tmp/qqfloatball.deb && sleep 2 && ls -la /var/jb/Library/MobileSubstrate/DynamicLibraries/QQFloatBall.* && killall -9 QQ 2>/dev/null; uiopen --bundleid com.tencent.xin"
+expect {
+    "password:" { send "alpine\r"; exp_continue }
+    -re "(Setting up|Unpacking|Preparing).*QQFloatBall" { exp_continue }
+    "dpkg:" { exp_continue }
+    eof { }
+    timeout { puts "install timeout"; exit 3 }
+}
+catch wait result
+puts "\n=== install done ==="
+exit [lindex $result 3]

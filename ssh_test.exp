@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+set timeout 10
+set ip [lindex $argv 0]
+set cmd [lindex $argv 1]
+if {$ip eq ""} { set ip "100.84.151.126" }
+if {$cmd eq ""} { set cmd "echo connected; ls /var/jb/Library/MobileSubstrate/DynamicLibraries/ | head -5" }
+spawn ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=10 root@$ip $cmd
+expect {
+    "password:" { send "alpine\r"; exp_continue }
+    -re "Connection (refused|timed out)" { exit 2 }
+    eof { }
+    timeout { exit 3 }
+}
+catch wait result
+exit [lindex $result 3]

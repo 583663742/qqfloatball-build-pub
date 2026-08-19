@@ -630,6 +630,11 @@ static BOOL isTaskCenterPage(NSString *url) {
             _inTaskCenter = YES;
             qqlogUI(@"正在打开等级页…");
             if (_logLabel) _logLabel.hidden = NO;
+            // 启动自动注入链（防重入：已有链在跑则跳过）
+            if (![self _qqfb_injectRunning]) {
+                __weak WKWebView *weakSelf = self;
+                [self injectAutoClaimWithRetry:weakSelf attempt:0];
+            }
         } else if (tracked && url.length > 0 && ![url hasPrefix:@"about:"]) {
             // 追踪中但跳走了 → 退出追踪（放行）
             qqlog(@"[WKWebView] 离开等级页，取消追踪: %@", url.length > 120 ? [url substringToIndex:120] : url);
@@ -649,28 +654,11 @@ static BOOL isTaskCenterPage(NSString *url) {
     return %orig(request);
 }
 
-// ── 额外拦截 1：loadHTMLString（QQ 可能直接塞空 HTML 清空页面）──
+// ── 阶段2：loadHTMLString 只记录日志，不拦截（放行所有页面加载）──
 - (WKNavigation *)loadHTMLString:(NSString *)string baseURL:(NSURL *)baseURL {
     @try {
-        BOOL tracked = [self _qqfb_isTracked] || _inTaskCenter;
-        NSString *b = baseURL.absoluteString ?: @"";
-        if (tracked) {
-            BOOL isEmptyClear = (string.length == 0
-                                 || [string isEqualToString:@""]
-                                 || [string isEqualToString:@"<html></html>"]
-                                 || [string isEqualToString:@"<html><head></head><body></body></html>"]
-                                 || (string.length < 50 && [string containsString:@"about:blank"]));
-            // baseURL 是 about:blank/空 也视为清空
-            BOOL baseIsBlank = (b.length == 0 || [b isEqualToString:@"about:blank"]);
-            if (isEmptyClear || baseIsBlank) {
-                qqlog(@"[WKWebView] 拦截loadHTMLString清空(htmlLen=%lu base=%@) -> 恢复任务页",
-                      (unsigned long)string.length, b.length > 80 ? [b substringToIndex:80] : b);
-                [self _qqfb_restoreIfCleared];
-                return nil;
-            }
-            qqlog(@"[WKWebView] loadHTMLString (追踪中，放行): htmlLen=%lu base=%@",
-                  (unsigned long)string.length, b.length > 80 ? [b substringToIndex:80] : b);
-        } else if (_captureEnabled) {
+        if (_captureEnabled) {
+            NSString *b = baseURL.absoluteString ?: @"";
             qqlog(@"[WKWebView] loadHTMLString: htmlLen=%lu base=%@",
                   (unsigned long)string.length, b.length > 80 ? [b substringToIndex:80] : b);
         }
@@ -678,26 +666,14 @@ static BOOL isTaskCenterPage(NSString *url) {
     return %orig(string, baseURL);
 }
 
-// ── 额外拦截 2：loadData（QQ 若直接塞空 data 清空页面）──
+// ── 阶段2：loadData 只记录日志，不拦截（放行所有数据加载）──
 - (WKNavigation *)loadData:(NSData *)data
                   MIMEType:(NSString *)MIMEType
     characterEncodingName:(NSString *)characterEncodingName
                   baseURL:(NSURL *)baseURL {
     @try {
-        BOOL tracked = [self _qqfb_isTracked] || _inTaskCenter;
-        NSString *b = baseURL.absoluteString ?: @"";
-        if (tracked) {
-            BOOL baseIsBlank = (b.length == 0 || [b isEqualToString:@"about:blank"]);
-            BOOL emptyData = (data.length == 0 || data.length < 4);
-            if (emptyData || baseIsBlank) {
-                qqlog(@"[WKWebView] 拦截loadData清空(dataLen=%lu base=%@) -> 恢复任务页",
-                      (unsigned long)data.length, b.length > 80 ? [b substringToIndex:80] : b);
-                [self _qqfb_restoreIfCleared];
-                return nil;
-            }
-            qqlog(@"[WKWebView] loadData (追踪中，放行): dataLen=%lu mime=%@ base=%@",
-                  (unsigned long)data.length, MIMEType, b.length > 80 ? [b substringToIndex:80] : b);
-        } else if (_captureEnabled) {
+        if (_captureEnabled) {
+            NSString *b = baseURL.absoluteString ?: @"";
             qqlog(@"[WKWebView] loadData: dataLen=%lu mime=%@ base=%@",
                   (unsigned long)data.length, MIMEType, b.length > 80 ? [b substringToIndex:80] : b);
         }
@@ -728,14 +704,15 @@ static WKWebView *findWKWebViewInView(UIView *v) {
     return nil;
 }
 
-// ── 复用 QQ 内置浏览器：QQWebViewController hook ──
+// ── 复用 QQ 内置浏览器：QQWebViewController hook（阶段2：只追踪，不拦截）──
 %hook QQWebViewController
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
     @try {
-        // viewDidAppear 时 view 树已建立，此时找 webview 打标最可靠
-        WKWebView *wv = findWKWebViewInView([(id)self valueForKey:@"view"]);
+        // viewDidAppear 时 view 树已建立，安全找 webview 打标
+        UIViewController *vc = (UIViewController *)self;
+        WKWebView *wv = findWKWebViewInView(vc.view);
         if (wv && _inTaskCenter) {
             [wv _qqfb_setTracked:YES];
             if (![wv _qqfb_lastGoodURL]) {
@@ -752,19 +729,10 @@ static WKWebView *findWKWebViewInView(UIView *v) {
     @try {
         NSString *url = request.URL.absoluteString ?: @"";
         qqlog(@"[QQWebVC] loadRequest: %@", url);
-        // 如果是任务页 URL，提前尝试找内部 webview 打标
+        // 阶段2：只追踪，不拦截。webview 可能在 loadRequest 时还未创建，不强行访问 view
         if (isTaskCenterPage(url)) {
             _inTaskCenter = YES;
-            WKWebView *wv = findWKWebViewInView([(id)self valueForKey:@"view"]);
-            if (wv) {
-                [wv _qqfb_setTracked:YES];
-                [wv _qqfb_setLastGoodURL:url];
-                qqlog(@"[QQWebVC] loadRequest 提前绑定 webview=%@", NSStringFromClass([wv class]));
-            }
         }
-        // 注意：不在 loadRequest 里注入脚本！
-        // 页面跳转到 Kuikly 页/控制器释放后 dispatch_after 里的 self 会悬垂 → 闪退
-        // 注入统一走 WKWebView loadRequest hook（自动注入）
     } @catch (NSException *e) {}
     %orig(request);
 }
@@ -772,42 +740,11 @@ static WKWebView *findWKWebViewInView(UIView *v) {
 - (void)setUrl:(NSString *)url {
     @try {
         NSString *u = url ?: @"";
-        // 更新任务页状态：加载 task-center 时置 YES，跳走到别的页面时置 NO
+        // 阶段2：只追踪状态，不拦截任何跳转（Kuikly 正常渲染）
         if (isTaskCenterPage(u)) {
             _inTaskCenter = YES;
-            // 同步内部 webview 打标
-            WKWebView *wv = findWKWebViewInView([(id)self valueForKey:@"view"]);
-            if (wv) {
-                [wv _qqfb_setTracked:YES];
-                [wv _qqfb_setLastGoodURL:u];
-            }
         } else if (u.length > 0 && ![u containsString:@"qqlevel"]) {
             _inTaskCenter = NO;
-            WKWebView *wv = findWKWebViewInView([(id)self valueForKey:@"view"]);
-            if (wv) [wv _qqfb_setTracked:NO];
-        }
-        // 拦截 Kuikly 自动跳转：让页面停留在 ti.qq.com 网页版任务中心（DOM 有按钮，JS 可点）
-        // Kuikly 是原生渲染框架，跳转后 webview 变 about:blank，注入脚本永远点不到按钮
-        if ([u containsString:@"openKuikly"]) {
-            qqlog(@"[QQWebVC] 拦截 Kuikly 跳转: %@", u);
-            // 同步让内部 webview 触发恢复
-            WKWebView *wv = findWKWebViewInView([(id)self valueForKey:@"view"]);
-            if (wv) {
-                [wv _qqfb_setTracked:YES];
-                [wv _qqfb_restoreIfCleared];
-            }
-            return;
-        }
-        // 拦截空 URL 清空：QQ 跳转 Kuikly 前先把页面 setUrl 成空串清空 → 变 about:blank
-        // 当前在任务页时，任何清空动作都拦截，保持网页版任务中心
-        if (u.length == 0 && _inTaskCenter) {
-            qqlog(@"[QQWebVC] 拦截空URL清空（保持任务页）");
-            WKWebView *wv = findWKWebViewInView([(id)self valueForKey:@"view"]);
-            if (wv) {
-                [wv _qqfb_setTracked:YES];
-                [wv _qqfb_restoreIfCleared];
-            }
-            return;
         }
         qqlog(@"[QQWebVC] setUrl: %@", u);
     } @catch (NSException *e) {}

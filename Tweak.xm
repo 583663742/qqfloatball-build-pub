@@ -801,13 +801,15 @@ static void dumpPSKeys(void) {
     //    acquireTopLevelWindowHighLevel: 把自己的窗口申请到 QQ 的顶层，
     //    层级永远跟 QQ 走，不打架。类不存在时静默跳过（兼容旧版本）。
     @try {
-        Class topWinMgr = NSClassFromString(@"QQFloatingWindowTopLevelWindowManager");
+        // 声明为 id（不要 Class）：id 可调任意 selector，Class 变量调方法编译器
+        // 会报 "no known class/instance method"（2026-08-19 CI 实锤两次）
+        id topWinMgr = (id)NSClassFromString(@"QQFloatingWindowTopLevelWindowManager");
         if (topWinMgr && [topWinMgr respondsToSelector:@selector(acquireTopLevelWindowHighLevel:)]) {
-            [(id)topWinMgr acquireTopLevelWindowHighLevel:floatWindow];
+            [topWinMgr acquireTopLevelWindowHighLevel:floatWindow];
             // 双保险：参照 QQ 顶层窗口的实际 windowLevel，把我们的窗口提到它之上。
             // 不能 addSubview 嵌套 window（会破坏事件路由），只能比层级。
             double targetLevel = UIWindowLevelAlert + 1;   // 兜底 2001
-            id topWin = [(id)topWinMgr topLevelWindow];
+            id topWin = [topWinMgr topLevelWindow];
             if (topWin && [topWin isKindOfClass:[UIWindow class]]) {
                 double lv = [(UIWindow *)topWin windowLevel];
                 if (lv > 0) targetLevel = lv + 1;

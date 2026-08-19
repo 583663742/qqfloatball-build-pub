@@ -1,38 +1,20 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
-#import <objc/runtime.h>
 
 // ── 持有悬浮球窗口和按钮的强引用，防止 ARC 释放 ──
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
-static UILabel *_logLabel = nil;        // 悬浮球旁的任务日志面板
-static NSMutableArray *_logLines = nil; // 最近日志行（UI 显示用）
-
-// ── UI 日志面板：主线程更新悬浮球旁的小黑条 ──
-static void qqlogUI(NSString *msg) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!_logLines) _logLines = [NSMutableArray array];
-        [_logLines addObject:msg];
-        if (_logLines.count > 6) [_logLines removeObjectAtIndex:0];
-        if (_logLabel) {
-            _logLabel.text = [_logLines componentsJoinedByString:@"\n"];
-        }
-    });
-}
+static UIView *_logView = nil;          // 任务日志面板
+static UITextView *_logTextView = nil;  // 日志文本
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 static BOOL _captureEnabled = NO;
-// ── 抓包模式：YES=只抓等级/任务关键词；NO=全量抓（排除打点/图片噪声）──
-static BOOL _captureOnlyTasks = YES;
-// ── 一键任务停止标记：YES=停止当前任务循环；NO=继续 ──
-static BOOL _autoStop = NO;
-// 标记当前 QQWebViewController 是否停留在等级任务中心页（用于拦截清空/跳走）
-static BOOL _inTaskCenter = NO;
-// 记录当前任务中心对应的 WKWebView（弱引用指针值，用关联对象更稳妥）
-static void *kQQFBTrackedKey = &kQQFBTrackedKey;
-static void *kQQFBLastGoodURLKey = &kQQFBLastGoodURLKey;
-static void *kQQFBInjectRunningKey = &kQQFBInjectRunningKey;
+// ── 仅抓等级关键词（keyTask）时才包装响应；全量模式只记请求不碰响应（防 Kuikly 白屏）──
+static BOOL _captureOnlyTasks = NO;
+
+// ── 一键任务执行状态 ──
+static BOOL _taskRunning = NO;
 
 // ── 网络抓包日志（写入 app 沙盒 Documents，SSH 可读）──
 static NSString *qqlogPath(void) {
@@ -56,39 +38,31 @@ static void qqlog(NSString *fmt, ...) {
     }
 }
 
-// ── 异步日志（抓包用）：不阻塞调用线程（NSURLSession 回调/主线程都可能调用）──
+// ── 异步写日志（不阻塞网络回调线程，防 Kuikly 加载变慢）──
 static void qqlogAsync(NSString *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    // 串行队列保证文件写不竞争（NSFileHandle 非线程安全）
-    static dispatch_queue_t logQ = nil;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        qqlog(@"%@", msg);
+    });
+}
+
+// ── 等级关键词判断（收窄匹配，防误伤无关请求）──
+static BOOL isLevelKeyURL(NSString *url) {
+    if (!url) return NO;
+    static NSArray *kws = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        logQ = dispatch_queue_create("com.qqfloatball.log", DISPATCH_QUEUE_SERIAL);
+        kws = @[@"qqlevel", @"tianxuan", @"commdeliver", @"levelTask", @"ExecAct",
+                @"GetUserRecord", @"openKuikly", @"benefit", @"GetBenefitsDetail",
+                @"GetUserItemsByBenefits", @"aggregation", @"GetTotalReadTime", @"GetShow"];
     });
-    dispatch_async(logQ, ^{
-        @try {
-            // 日志上限 5MB：超了自动停止抓包（防止日志爆炸拖慢系统）
-            NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:qqlogPath() error:nil];
-            NSNumber *sz = attrs[NSFileSize];
-            if (sz.longLongValue > 5 * 1024 * 1024) {
-                _captureEnabled = NO;
-                return;
-            }
-            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
-            if (!fh) {
-                [[NSFileManager defaultManager] createFileAtPath:qqlogPath() contents:nil attributes:nil];
-                fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
-            }
-            if (fh) {
-                [fh seekToEndOfFile];
-                [fh writeData:[[msg stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
-                [fh closeFile];
-            }
-        } @catch (NSException *e) {}
-    });
+    for (NSString *kw in kws) {
+        if ([url containsString:kw]) return YES;
+    }
+    return NO;
 }
 
 // ── 提前声明 %new 方法，供 dispatch_once block 内调用 ──
@@ -136,10 +110,13 @@ static void qqlogAsync(NSString *fmt, ...) {
     return self;
 }
 
-// 只有触摸悬浮球区域才响应，其余一律穿透给 QQ
+// 只有触摸悬浮球区域（或日志面板）才响应，其余一律穿透给 QQ
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (_floatBall && CGRectContainsPoint(_floatBall.frame, point)) {
         return _floatBall;
+    }
+    if (_logView && !_logView.hidden && CGRectContainsPoint(_logView.frame, point)) {
+        return _logView;
     }
     return nil;
 }
@@ -147,7 +124,8 @@ static void qqlogAsync(NSString *fmt, ...) {
 @end
 
 // ──────────────────────────────────────────
-//  网络抓包：hook NSURLSession，记录所有请求到日志
+//  网络抓包：hook NSURLSession，记录等级相关请求
+//  ⚠️ 全量模式只记请求不包装 completionHandler（包装会致 Kuikly 白屏）
 // ──────────────────────────────────────────
 %hook NSURLSession
 
@@ -155,60 +133,24 @@ static void qqlogAsync(NSString *fmt, ...) {
     @try {
         if (_captureEnabled) {
             NSString *url = request.URL.absoluteString ?: @"";
-            // 抓包 v3：全请求记录（排除打点/静态资源噪声），异步日志不卡界面
-            // 噪声排除：report/action 打点、图片/字体/JS/CSS 静态资源、统计上报
-            BOOL noise = ([url containsString:@"/report/action"]
-                       || [url containsString:@"reportData"]
-                       || [url containsString:@"monitor"]
-                       || [url containsString:@"mta.qq.com"]
-                       || [url containsString:@"beacon.qq.com"]
-                       || [url hasSuffix:@".png"] || [url hasSuffix:@".jpg"] || [url hasSuffix:@".jpeg"]
-                       || [url hasSuffix:@".gif"] || [url hasSuffix:@".webp"] || [url hasSuffix:@".css"]
-                       || [url hasSuffix:@".js"] || [url hasSuffix:@".woff"] || [url hasSuffix:@".woff2"]
-                       || [url hasSuffix:@".ttf"] || [url hasSuffix:@".ico"] || [url hasSuffix:@".mp4"]);
-            // 等级/任务相关关键词：记录请求+响应（重点）
-            BOOL keyTask = ([url containsString:@"qqlevel"]
-                          || [url containsString:@"tianxuan"]
-                          || [url containsString:@"commdeliver"]
-                          || [url containsString:@"levelTask"]
-                          || [url containsString:@"ExecAct"]
-                          || [url containsString:@"GetUserRecord"]
-                          || [url containsString:@"openKuikly"]
-                          || [url containsString:@"dengji_task"]
-                          || [url containsString:@"task-center"]
-                          || [url containsString:@"signin"]);
-            if (!noise && (keyTask || !_captureOnlyTasks)) {
-                NSString *body = @"";
-                if (request.HTTPBody.length > 0) {
-                    body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
-                    if (!body) body = [request.HTTPBody description];
-                    if (body.length > 500) body = [body substringToIndex:500];
-                }
+            BOOL keyTask = isLevelKeyURL(url);
+            if (keyTask) {
+                // 等级关键词：异步记录（URL+body），数量少可包装响应
+                NSString *body = request.HTTPBody ? [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding] : @"";
                 qqlogAsync(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url, body);
-                // 只有等级关键词请求才包装记录响应（数量少、零影响）
-                // 全量模式只记请求不碰响应 —— 包装 completionHandler 会导致 Kuikly 页面白屏（实测盲盒/打卡/漫剧/元宝）
-                // 且等级页本身是 Kuikly，全量模式下连 keyTask 也不包装，保证零干预
-                if (keyTask && _captureOnlyTasks) {
+                if (_captureOnlyTasks) {
                     void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-                        if (completionHandler) completionHandler(data, resp, err);  // ← 立即放行，不阻塞页面
-                        NSString *u = [url copy];
-                        NSData *d = [data copy];
-                        NSError *e = err;
-                        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-                            @try {
-                                if (d.length > 0) {
-                                    NSString *respStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-                                    if (respStr.length > 1000) respStr = [respStr substringToIndex:1000];
-                                    qqlogAsync(@"[NSURLSession]  ← RESP %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, respStr);
-                                } else if (e) {
-                                    qqlogAsync(@"[NSURLSession]  ← ERR %@ : %@", u.length > 100 ? [u substringToIndex:100] : u, e.localizedDescription);
-                                }
-                            } @catch (NSException *ex) {}
-                        });
+                        if (data && data.length > 0) {
+                            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                            qqlogAsync(@"[resp] %@ -> %@", url, respStr.length > 2000 ? [respStr substringToIndex:2000] : respStr);
+                        }
+                        if (completionHandler) completionHandler(data, resp, err);
                     };
                     return %orig(request, wrapped);
                 }
-                return %orig(request, completionHandler);
+            } else if (_captureEnabled && !_captureOnlyTasks) {
+                // 全量模式：只记 URL，不包装
+                qqlogAsync(@"[NSURLSession] %@ %@", request.HTTPMethod ?: @"GET", url);
             }
         }
     } @catch (NSException *e) {}
@@ -242,515 +184,396 @@ static void dumpWebKitCookies(void) {
     }
 }
 
-// ── WebView 自动领取脚本（注入式，返回诊断 JSON）──
-static NSString *autoClaimScript(void) {
-    return @"(function(){"
-        "var diag={url:location.href||'',host:location.host||'',path:location.pathname||''};"
-        "var inLevelPage=function(){"
-        "  var h=location.host||'';var p=location.pathname||'';"
-        "  if(h.indexOf('ti.qq.com')>=0&&p.indexOf('qqlevel')>=0)return true;"
-        "  if(h.indexOf('club.vip.qq.com')>=0&&p.indexOf('qqlevel')>=0)return true;"
-        "  if(p.indexOf('openKuikly')>=0&&diag.url.indexOf('qqlevel')>=0)return true;"
-        "  return false;"
-        "};"
-        "if(!inLevelPage()){"
-        "  diag.result='not_level_page';"
-        "  return JSON.stringify(diag);"
-        "}"
-        "if(window._qqAutoClaimRunning){diag.result='already_running';return JSON.stringify(diag);}"
-        "window._qqAutoClaimRunning=true;"
-        "var api=function(path,data){"
-        "  var r=null;"
-        "  try{"
-        "    r=new XMLHttpRequest();"
-        "    r.open('POST','//'+location.host+path,false);"  // 同步同源请求，cookie 自动带
-        "    r.setRequestHeader('Content-Type','application/json');"
-        "    r.send(JSON.stringify(data));"
-        "    return r.status===200&&r.responseText?JSON.parse(r.responseText):null;"
-        "  }catch(e){diag.api_err=(diag.api_err||'')+e.message+';';return null;}"
-        "};"
-        // 1. 拉任务列表（模拟器 Qsped 方案：页面内 fetch TRPC，同源 cookie 无 -3000）
-        "var j=api('/qqlevel/trpc/levelTask/Get',{mode:42});"
-        "if(!j){diag.result='api_fail';return JSON.stringify(diag);}"
-        "var tasks=(j.response&&j.response.task_list)||j.task_list||[];"
-        "diag.total=tasks.length;diag.result='started';diag.clicked=0;"
-        "var log=function(msg){"
-        "  try{"
-        "    var d=document.createElement('div');"
-        "    d.style.cssText='position:fixed;bottom:10px;left:10px;z-index:999999;background:rgba(0,0,0,0.8);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;max-width:80%;word-break:break-all;';"
-        "    d.textContent='[自动任务] '+msg;"
-        "    document.body.appendChild(d);"
-        "    setTimeout(function(){try{d.remove()}catch(e){}},3000);"
-        "  }catch(e){}"
-        "};"
-        "log('任务数: '+tasks.length);"
-        // 2. 诊断：记录每个任务状态
-        "diag.list=[];"
-        "for(var i=0;i<tasks.length;i++){"
-        "  var t=tasks[i];"
-        "  diag.list.push({id:t.task_id,st:t.status,btn:t.button_text||'',award:t.award_rule_id||'',title:(t.title||'').substring(0,12)});"
-        "}"
-        // 3. status=2 可领取 → ExecAct 领奖（同源 fetch TRPC，页面自身请求不会被拒）
-        "var claimed=0,errs=0;"
-        "for(var i=0;i<tasks.length;i++){"
-        "  var t=tasks[i];"
-        "  if(t.status===2&&t.award_rule_id){"
-        "    var req=JSON.stringify({sub_act_id:t.award_rule_id,task_id:t.unique_task_id||t.task_id,uid:(window.mqq&&mqq.user&&mqq.user.getUin?String(mqq.user.getUin()):''),business_task_id:t.business_task_id||''});"
-        "    var body={SubActId:t.award_rule_id,ClientPlat:'h5',Aid:'',EnteranceId:'',ActReqData:req};"
-        "    var rr=api('/qqlevel/tianxuan/trpc/access/ExecAct',body);"
-        "    if(rr&&rr.code===0){claimed++;log('已领奖: '+t.title);}"
-        "    else{errs++;log('领奖失败: '+t.title+' code='+(rr&&rr.code));}"
-        "  }"
-        "}"
-        "diag.claimed=claimed;diag.errs=errs;"
-        // 点击 status=0 待完成任务页面上的『去完成/去打卡/去添加』按钮
-        // iOS 任务全是 status=0（button_text: 去完成/去打卡/去添加），按钮在网页版 DOM 里
-        "var clicked=0;"
-        "var btnKeys=['去完成','去打卡','去添加','去领取','立即领取','领取'];"
-        "var all=document.querySelectorAll('button,div,span,a,[class*=\"btn\"],[class*=\"button\"],li');"
-        "for(var i=0;i<all.length;i++){"
-        "  var el=all[i];"
-        "  try{"
-        "    var txt=(el.textContent||el.innerText||'').trim();"
-        "    for(var k=0;k<btnKeys.length;k++){"
-        "      if(txt===btnKeys[k]||txt.indexOf(btnKeys[k])===0){"
-        "        el.click();clicked++;"
-        "        log('点击按钮: '+txt.substring(0,20));"
-        "        break;"
-        "      }"
-        "    }"
-        "  }catch(e){}"
-        "}"
-        "diag.clicked=clicked;"
-        "log('点击 '+clicked+' 个按钮');"
-        "diag.final='done';"
-        "return JSON.stringify(diag);"
-        "})();";
-}
+// ══════════════════════════════════════════
+//  一键做任务：HTTP 直连执行器
+//  核心接口（2026-08-19 主号 583663742 抓包实证）：
+//   1. levelTask/Get  → ti.qq.com，bkn=hash33(ti域p_skey)，body {"mode":42}
+//   2. ExecAct 领奖   → act.qzone.qq.com，g_tk=bkn，Cookie uin/p_uin/p_skey
+//   3. 福利社领券链   → GetBenefitsDetail → ExecAct → GetUserItemsByBenefits
+// ══════════════════════════════════════════
 
-// ── 检测 WebView 是否在等级页面（task-center 或 Kuikly 任务页）──
-static BOOL isTaskCenterPage(NSString *url) {
-    if (!url) return NO;
-    // ti.qq.com/qqlevel 是原始等级页；club.vip.qq.com/openKuikly 是自动跳转后的 Kuikly 任务页
-    if ([url containsString:@"ti.qq.com"] && [url containsString:@"qqlevel"]) return YES;
-    if ([url containsString:@"club.vip.qq.com"] && [url containsString:@"qqlevel"]) return YES;
-    if ([url containsString:@"openKuikly"] && [url containsString:@"qqlevel"]) return YES;
-    return NO;
-}
-
-// 是否该拦截的跳转（模拟器 Qsped 方案：拦截一切离开 task-center 网页版的跳转）
-// 阶段2：不再拦截跳转（等级页 = Kuikly 渲染，拦截导致白屏）
-// 原 shouldBlockNav 已删除——放行所有导航，让 QQ 自由渲染等级页
-
-// 声明接口让编译器可见（%new 实现只在 runtime 添加，编译期需要 category 声明；必须放 %hook 块外）
-@interface WKWebView (QQFBAutoClaim)
-- (void)injectAutoClaimWithRetry:(WKWebView *)weakSelf attempt:(int)attempt;
-- (BOOL)_qqfb_isTracked;
-- (void)_qqfb_setTracked:(BOOL)flag;
-- (NSString *)_qqfb_lastGoodURL;
-- (void)_qqfb_setLastGoodURL:(NSString *)url;
-- (void)_qqfb_restoreIfCleared;
-- (BOOL)_qqfb_injectRunning;
-- (void)_qqfb_setInjectRunning:(BOOL)flag;
-@end
-
-%hook WKWebView
-
-// ── 关联对象辅助：每个 WKWebView 独立追踪自己的状态，避免多 WebView 串扰 ──
-%new
-- (BOOL)_qqfb_isTracked {
-    NSNumber *n = objc_getAssociatedObject(self, kQQFBTrackedKey);
-    return n ? n.boolValue : NO;
-}
-%new
-- (void)_qqfb_setTracked:(BOOL)flag {
-    objc_setAssociatedObject(self, kQQFBTrackedKey, @(flag), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-%new
-- (NSString *)_qqfb_lastGoodURL {
-    return objc_getAssociatedObject(self, kQQFBLastGoodURLKey);
-}
-%new
-- (void)_qqfb_setLastGoodURL:(NSString *)url {
-    objc_setAssociatedObject(self, kQQFBLastGoodURLKey, url, OBJC_ASSOCIATION_COPY_NONATOMIC);
-}
-
-// 被追踪的任务页 WebView 若被清空成 about:blank/空 → 异步恢复到上次好的 URL
-%new
-- (void)_qqfb_restoreIfCleared {
-    NSString *last = [self _qqfb_lastGoodURL];
-    if (!last || last.length == 0) {
-        last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
+// ── hash33 算法：bkn = hash33(p_skey) ──
+static int hash33(NSString *str) {
+    if (!str) return 0;
+    int e = 0;
+    for (int i = 0; i < str.length; i++) {
+        e += (e << 5) + [str characterAtIndex:i];
     }
-    qqlog(@"[WKWebView] 恢复任务页: %@", last);
-    // 异步恢复，避免在当前 load/set 的调用栈里递归触发
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            [self loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
-        } @catch (NSException *e) {
-            qqlog(@"[WKWebView] 恢复失败: %@", e);
-        }
-    });
+    return 2147483647 & e;
 }
 
-// ── 防重入：每个 WKWebView 同一时刻只跑一条注入重试链 ──
-%new
-- (BOOL)_qqfb_injectRunning {
-    NSNumber *n = objc_getAssociatedObject(self, kQQFBInjectRunningKey);
-    return n ? n.boolValue : NO;
-}
-%new
-- (void)_qqfb_setInjectRunning:(BOOL)flag {
-    objc_setAssociatedObject(self, kQQFBInjectRunningKey, @(flag), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  【注入链死锁问题 · 完整记录】
-//
-//  ▸ 现象日志（沙盒 Documents/qqflog.txt 真实出现过）:
-//    [WKWebView] 拦截about:blank清空 -> 恢复任务页
-//    [WKWebView] 恢复任务页: https://ti.qq.com/qqlevel/task-center?...
-//    —— 此后 [autoClaim] 一行都没有，注入链"消失"了。
-//    再次点"⚡ 一键做任务" → 日志 [autoClaim] 已有注入链在跑，跳过重复启动
-//    结论：injectRunning=YES 死锁，evaluateJavaScript completion 永不回调。
-//
-//  ▸ 根因分析:
-//    QQ 把 WebView 清成 about:blank 有两条路径：① 同步 loadRequest:about:blank（
-//    已拦截）；② 先 kill 掉 WebContent 进程 / 重建内部 BackForwardList / 直接
-//    走  loadHTMLString:@"" / 或 更底层 _setDocumentURL 等 私有 API。此时
-//    WKWebView 对外壳看起来"活着"，但 JS 引擎侧已经失联，evaluateJavaScript 的
-//    completion block 既不 success 也不 error，就**永远挂着**。我们的 unlock 逻
-//    辑只在 completion 里，于是 injectRunning 关联对象**永久卡死在 YES**。
-//
-//  ▸ 3 个可选修复方向:
-//    ①【本方案采用 · 最轻量】给每层 evaluateJavaScript 加 5s 看门狗（dispatch_after）。
-//      看门狗先于 completion 触发就判为"completion 挂死"，强制解锁 + 恢复 + 重启链。
-//      为避免"看门狗触发后 completion 又姗姗来迟"的双跑，用 __block BOOL fired 做
-//      CAS 式抢占，谁先把 fired=YES 谁就握有推进权。
-//    ②【更可靠，但改动大】hook WKWebView setNavigationDelegate: 包一层中间代理，
-//      靠 didFinishNavigation / didFailNavigation 来触发注入，天然避开"JS死等"。
-//      缺点是 QQ 可能在多个时机换 delegate、自定义子类 QQWKWebView 可能不走通用 setter。
-//    ③【兜底补充】在"一键做任务"按钮 handler 加检测：若 injectRunning=YES 但 15s
-//      内没任何 [autoClaim] 日志推进，则强制 reset injectRunning=NO（暴力解锁）。
-//      实现简单但无法根因修复，只是给用户手点的逃生通道。
-//
-//  ▸ 注意事项（严格遵守）:
-//    ❌ 别改动 WKWebView 层已有的 about:blank / Kuikly / loadHTMLString / loadData
-//       拦截逻辑——日志已确认它们命中有效。
-//    ❌ 别把 attempt 重启写成 attempt:0 新开链；超时是同一条链内部的"伪推进"，必
-//       须走 attempt+1，否则 injectRunning 防重入会被绕开。
-//    ✅ 每次超时必须：[1] 解锁 injectRunning=NO [2] setTracked=YES（保证恢复路
-//       径拦截生效）[3] _qqfb_restoreIfCleared（或 loadRequest 任务页）[4] 调
-//       injectAutoClaimWithRetry: attempt+1（注意必须先解锁，否则 attempt+1 内的
-//       上层检查不会新开——但 attempt>0 不走 attempt==0 分支所以没事，安全）。
-// ═══════════════════════════════════════════════════════════════════
-//  Qsped 模拟器方案：页面停留网页版后，页面内 JS 同源 fetch TRPC（levelTask/Get +
-//  ExecAct），cookie 自动带、无插件进程 -3000 死路。
-%new
-- (void)injectAutoClaimWithRetry:(__weak WKWebView *)weakSelf attempt:(int)attempt {
-    // attempt==0 表示由外部启动新链；>0 是同一条链的后续重试
-    if (attempt == 0) {
-        if ([self _qqfb_injectRunning]) {
-            qqlog(@"[autoClaim] 已有注入链在跑，跳过重复启动（若卡死请看门狗/手点按钮重置）");
-            return;
-        }
-        [self _qqfb_setInjectRunning:YES];
-    }
-    if (attempt >= 10) {
-        qqlog(@"[autoClaim] 重试%d次仍失败（看门狗可能已救过多次），彻底放弃", attempt);
-        [self _qqfb_setInjectRunning:NO];
-        return;
-    }
-    int64_t delaySec = (attempt == 0) ? 3 : 2;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delaySec * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        WKWebView *strongSelf = weakSelf;
-        if (!strongSelf) {
-            qqlog(@"[autoClaim] webview 已释放，终止重试");
-            [weakSelf _qqfb_setInjectRunning:NO];
-            return;
-        }
-
-        // ───────────────────────────────────────────────────
-        //  第 1 层：查 location.href （带 5s 看门狗）
-        // ───────────────────────────────────────────────────
-        @autoreleasepool {
-            __block BOOL fired1 = NO;
-            void (^timeout1)(void) = ^{
-                if (fired1) return;
-                fired1 = YES;  // 看门狗抢到推进权
-                qqlog(@"[autoClaim] 第%d次：⚡看门狗超时！第1层location.href回调永不触发，强制解锁+恢复+重启", attempt + 1);
-                [strongSelf _qqfb_setInjectRunning:NO];
-                [strongSelf _qqfb_setTracked:YES];
-                NSString *last = [strongSelf _qqfb_lastGoodURL];
-                if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
-                @try {
-                    [strongSelf loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
-                } @catch (NSException *ee) {}
-                // 同一条链内部推进：attempt+1
-                [strongSelf injectAutoClaimWithRetry:strongSelf attempt:attempt + 1];
-            };
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), timeout1);
-
-            [strongSelf evaluateJavaScript:@"location.href" completionHandler:^(id _Nullable r, NSError * _Nullable e) {
-                if (fired1) return;  // 看门狗先抢了，别再双跑
-                fired1 = YES;
-                WKWebView *ss = strongSelf;
-                if (!ss) { [weakSelf _qqfb_setInjectRunning:NO]; return; }
-
-                if (e || ![r isKindOfClass:[NSString class]] || [(NSString *)r length] == 0) {
-                    qqlog(@"[autoClaim] 第%d次：页面未就绪（%@），重试", attempt + 1, e ? e.localizedDescription : @"空URL");
-                    [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                    return;
-                }
-                NSString *cur = (NSString *)r;
-                if ([cur isEqualToString:@"about:blank"] || [cur hasPrefix:@"about:"]) {
-                    qqlog(@"[autoClaim] 第%d次：about:blank，主动恢复任务页", attempt + 1);
-                    [ss _qqfb_setTracked:YES];
-                    NSString *last = [ss _qqfb_lastGoodURL];
-                    if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
-                    @try {
-                        [ss loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
-                    } @catch (NSException *ee) {}
-                    [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                    return;
-                }
-                if (!isTaskCenterPage(cur)) {
-                    qqlog(@"[autoClaim] 第%d次：URL非任务页: %@", attempt + 1,
-                          cur.length > 120 ? [cur substringToIndex:120] : cur);
-                    [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                    return;
-                }
-
-                // ───────────────────────────────────────────────────
-                //  第 2 层：查 document.readyState （带 5s 看门狗）
-                // ───────────────────────────────────────────────────
-                @autoreleasepool {
-                    __block BOOL fired2 = NO;
-                    void (^timeout2)(void) = ^{
-                        if (fired2) return;
-                        fired2 = YES;
-                        qqlog(@"[autoClaim] 第%d次：⚡看门狗超时！第2层readyState回调永不触发，强制解锁+恢复+重启", attempt + 1);
-                        [ss _qqfb_setInjectRunning:NO];
-                        [ss _qqfb_setTracked:YES];
-                        NSString *last = [ss _qqfb_lastGoodURL];
-                        if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
-                        @try {
-                            [ss loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
-                        } @catch (NSException *ee) {}
-                        [ss injectAutoClaimWithRetry:ss attempt:attempt + 1];
-                    };
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), timeout2);
-
-                    [ss evaluateJavaScript:@"document.readyState" completionHandler:^(id _Nullable rs, NSError * _Nullable rse) {
-                        if (fired2) return;
-                        fired2 = YES;
-                        WKWebView *ss2 = ss;
-                        if (!ss2) { [ss _qqfb_setInjectRunning:NO]; return; }
-                        NSString *ready = [rs isKindOfClass:[NSString class]] ? rs : nil;
-                        if (!ready || (![ready isEqualToString:@"interactive"] && ![ready isEqualToString:@"complete"])) {
-                            qqlog(@"[autoClaim] 第%d次：DOM未就绪 readyState=%@，重试", attempt + 1, ready ?: @"nil");
-                            [ss2 injectAutoClaimWithRetry:ss2 attempt:attempt + 1];
-                            return;
-                        }
-
-                        // ───────────────────────────────────────────────────
-                        //  第 3 层：真正注入 autoClaimScript() （带 20s 看门狗）
-                        //  脚本内有同步 XHR fetch TRPC 可能耗时稍长，给足 20s
-                        // ───────────────────────────────────────────────────
-                        @autoreleasepool {
-                            __block BOOL fired3 = NO;
-                            void (^timeout3)(void) = ^{
-                                if (fired3) return;
-                                fired3 = YES;
-                                qqlog(@"[autoClaim] 第%d次：⚡看门狗超时！第3层领奖脚本执行永不回调（20s），强制解锁+恢复+重启", attempt + 1);
-                                [ss2 _qqfb_setInjectRunning:NO];
-                                [ss2 _qqfb_setTracked:YES];
-                                NSString *last = [ss2 _qqfb_lastGoodURL];
-                                if (!last) last = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
-                                @try {
-                                    [ss2 loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:last]]];
-                                } @catch (NSException *ee) {}
-                                [ss2 injectAutoClaimWithRetry:ss2 attempt:attempt + 1];
-                            };
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)),
-                                           dispatch_get_main_queue(), timeout3);
-
-                            [ss2 evaluateJavaScript:autoClaimScript() completionHandler:^(id _Nullable result, NSError * _Nullable error) {
-                                if (fired3) return;
-                                fired3 = YES;
-                                WKWebView *ss3 = ss2;
-                                if (!ss3) { return; }
-                                if (error) {
-                                    qqlog(@"[autoClaim] 注入失败: %@", error.localizedDescription);
-                                    qqlogUI([NSString stringWithFormat:@"注入失败: %@", error.localizedDescription]);
-                                    [ss3 injectAutoClaimWithRetry:ss3 attempt:attempt + 1];
-                                } else {
-                                    NSString *res = result ?: @"";
-                                    qqlog(@"[autoClaim] 注入结果: %@", res.length > 500 ? [res substringToIndex:500] : res);
-                                    qqlogUI([NSString stringWithFormat:@"自动任务: %@", res.length > 180 ? [res substringToIndex:180] : res]);
-                                    if ([res containsString:@"not_level_page"] || [res containsString:@"api_fail"]) {
-                                        [ss3 injectAutoClaimWithRetry:ss3 attempt:attempt + 1];
-                                    } else {
-                                        qqlog(@"[autoClaim] 注入链正常结束");
-                                        [ss3 _qqfb_setInjectRunning:NO];
-                                    }
-                                }
-                            }];
-                        }
-                    }];
-                }
-            }];
-        }
-    });
-}
-
-// ── 核心拦截：loadRequest（阶段2：放行 Kuikly，不再拦截跳转）──
-- (WKNavigation *)loadRequest:(NSURLRequest *)request {
+// ── 直接调用 QQLoginPSKeyManager 拿指定域 p_skey（keyType=1，现取现用）──
+static NSString *getPskey(NSString *domain, NSString *uin, int keyType) {
     @try {
-        NSString *url = request.URL.absoluteString ?: @"";
-        BOOL tracked = [self _qqfb_isTracked] || _inTaskCenter;
-        if (_captureEnabled) {
-            qqlog(@"[WKWebView] loadRequest (tracked=%d): %@", tracked, url);
+        Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
+        if (!mgrCls) return nil;
+        id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance"));
+        if (!mgr) return nil;
+        SEL sel = NSSelectorFromString(@"getLocalKeyOfDomain:uin:keyType:");
+        NSMethodSignature *sig = [mgr methodSignatureForSelector:sel];
+        if (!sig) return nil;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:mgr];
+        [inv setSelector:sel];
+        __unsafe_unretained NSString *dArg = domain;
+        __unsafe_unretained NSString *uArg = uin;
+        [inv setArgument:&dArg atIndex:2];
+        [inv setArgument:&uArg atIndex:3];
+        NSInteger kt = keyType;
+        [inv setArgument:&kt atIndex:4];
+        [inv invoke];
+        __unsafe_unretained id ret = nil;
+        [inv getReturnValue:&ret];
+        if (ret && [ret isKindOfClass:[NSString class]] && [(NSString *)ret length] > 0) {
+            return ret;
         }
+    } @catch (NSException *e) {}
+    return nil;
+}
 
-        // ── 阶段2：放行所有跳转（Kuikly 正常渲染等级页）──
-        // 等级页 = Kuikly 原生渲染，拦截会导致白屏。让 QQ 自由导航，
-        // 我们只做追踪标记 + 抓包观察。
+// ── 取当前登录 uin（从 p_skey 管理器遍历已知账号）──
+static NSString *getCurrentUin(void) {
+    @try {
+        NSArray *candidates = @[@"583663742", @"820284286", @"1172628163"];
+        for (NSString *u in candidates) {
+            NSString *psk = getPskey(@"ti.qq.com", u, 1);
+            if (psk && psk.length > 0) return u;
+        }
+    } @catch (NSException *e) {}
+    return @"583663742"; // 兜底主号
+}
 
-        // ── 正常请求 → 如果是任务页/Kuikly 等级页，打标追踪 ──
-        BOOL isLevel = isTaskCenterPage(url)
-                    || [url containsString:@"qqlevel"]
-                    || ([url containsString:@"openKuikly"] && [url containsString:@"qqlevel"])
-                    || ([url containsString:@"openKuikly"] && [url containsString:@"vas_qqvip_account_info_host"]);
-        if (isLevel) {
-            [self _qqfb_setTracked:YES];
-            [self _qqfb_setLastGoodURL:url];
-            _inTaskCenter = YES;
-            qqlogUI(@"正在打开等级页…");
-            if (_logLabel) _logLabel.hidden = NO;
-            // 启动自动注入链（防重入：已有链在跑则跳过）
-            if (![self _qqfb_injectRunning]) {
-                __weak WKWebView *weakSelf = self;
-                [self injectAutoClaimWithRetry:weakSelf attempt:0];
+// ── 同步 POST JSON，返回解析后的字典 ──
+static NSDictionary *httpPostJSON(NSString *url, NSDictionary *bodyDict, NSString *cookieHeader, int timeoutSec) {
+    @try {
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        if (cookieHeader) [req setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+        [req setValue:@"Dalvik/2.1.0 (Linux; U; Android 13; zh-cn; 2201123G Build/TKQ1.220829.002) V1_AND_SQ_9.2.0_10970_YYB_D QQ/9.2.0.28325" forHTTPHeaderField:@"User-Agent"];
+        NSData *bodyData = [NSJSONSerialization dataWithJSONObject:bodyDict options:0 error:nil];
+        req.HTTPBody = bodyData;
+
+        __block NSDictionary *result = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.timeoutIntervalForRequest = timeoutSec;
+        cfg.timeoutIntervalForResource = timeoutSec + 5;
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+        [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if (!err && data) {
+                id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([obj isKindOfClass:[NSDictionary class]]) {
+                    result = obj;
+                } else if ([obj isKindOfClass:[NSArray class]]) {
+                    result = @{@"data_array": obj};
+                }
             }
-        } else if (tracked && url.length > 0 && ![url hasPrefix:@"about:"]) {
-            // 追踪中但跳走了 → 退出追踪（放行）
-            qqlog(@"[WKWebView] 离开等级页，取消追踪: %@", url.length > 120 ? [url substringToIndex:120] : url);
-            [self _qqfb_setTracked:NO];
-            _inTaskCenter = NO;
-        }
-
-        if (_captureEnabled && ([url containsString:@"ti.qq.com"] ||
-            [url containsString:@"qqlevel"] ||
-            [url containsString:@"tianxuan"] ||
-            [url containsString:@"openKuikly"])) {
-            dumpWebKitCookies();
-        }
+            dispatch_semaphore_signal(sem);
+        }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (timeoutSec + 10) * NSEC_PER_SEC));
+        [session finishTasksAndInvalidate];
+        return result;
     } @catch (NSException *e) {
-        qqlog(@"[WKWebView] loadRequest 异常: %@", e);
-    }
-    return %orig(request);
-}
-
-// ── 阶段2：loadHTMLString 只记录日志，不拦截（放行所有页面加载）──
-- (WKNavigation *)loadHTMLString:(NSString *)string baseURL:(NSURL *)baseURL {
-    @try {
-        if (_captureEnabled) {
-            NSString *b = baseURL.absoluteString ?: @"";
-            qqlog(@"[WKWebView] loadHTMLString: htmlLen=%lu base=%@",
-                  (unsigned long)string.length, b.length > 80 ? [b substringToIndex:80] : b);
-        }
-    } @catch (NSException *e) {}
-    return %orig(string, baseURL);
-}
-
-// ── 阶段2：loadData 只记录日志，不拦截（放行所有数据加载）──
-- (WKNavigation *)loadData:(NSData *)data
-                  MIMEType:(NSString *)MIMEType
-    characterEncodingName:(NSString *)characterEncodingName
-                  baseURL:(NSURL *)baseURL {
-    @try {
-        if (_captureEnabled) {
-            NSString *b = baseURL.absoluteString ?: @"";
-            qqlog(@"[WKWebView] loadData: dataLen=%lu mime=%@ base=%@",
-                  (unsigned long)data.length, MIMEType, b.length > 80 ? [b substringToIndex:80] : b);
-        }
-    } @catch (NSException *e) {}
-    return %orig(data, MIMEType, characterEncodingName, baseURL);
-}
-
-// hook evaluateJavaScript 记录
-- (void)evaluateJavaScript:(NSString *)script completionHandler:(void (^)(id, NSError *))completionHandler {
-    @try {
-        if (_captureEnabled && [script length] > 0 && [script length] < 200) {
-            qqlog(@"[WKWebView] eval: %@", [script substringToIndex:MIN(100, script.length)]);
-        }
-    } @catch (NSException *e) {}
-    return %orig(script, completionHandler);
-}
-
-%end
-
-// 递归在 view 树里找 WKWebView（含 QQ 自定义子类 QQWKWebView 等）
-static WKWebView *findWKWebViewInView(UIView *v) {
-    if (!v) return nil;
-    if ([v isKindOfClass:[WKWebView class]]) return (WKWebView *)v;
-    for (UIView *sv in v.subviews) {
-        WKWebView *found = findWKWebViewInView(sv);
-        if (found) return found;
+        qqlog(@"[http] 异常 %@", e);
     }
     return nil;
 }
 
-// ── 复用 QQ 内置浏览器：QQWebViewController hook（阶段2：只追踪，不拦截）──
-%hook QQWebViewController
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);
+// ── 拉取任务列表：levelTask/Get ──
+static NSArray *fetchTaskList(NSString *uin, NSString *tiPskey, int *retCodeOut) {
     @try {
-        // viewDidAppear 时 view 树已建立，安全找 webview 打标
-        UIViewController *vc = (UIViewController *)self;
-        WKWebView *wv = findWKWebViewInView(vc.view);
-        if (wv && _inTaskCenter) {
-            [wv _qqfb_setTracked:YES];
-            if (![wv _qqfb_lastGoodURL]) {
-                [wv _qqfb_setLastGoodURL:@"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38"];
+        int bkn = hash33(tiPskey);
+        NSString *url = [NSString stringWithFormat:@"https://ti.qq.com/qqlevel/trpc/levelTask/Get?bkn=%d", bkn];
+        NSString *cookie = [NSString stringWithFormat:@"uin=o%@; p_uin=o%@; p_skey=%@", uin, uin, tiPskey];
+        NSDictionary *resp = httpPostJSON(url, @{@"mode": @42}, cookie, 15);
+        if (!resp) {
+            if (retCodeOut) *retCodeOut = -1;
+            qqlog(@"[taskList] 无响应");
+            return nil;
+        }
+        id ret = resp[@"ret"];
+        if (retCodeOut) *retCodeOut = [ret intValue];
+        qqlog(@"[taskList] ret=%@", ret);
+        // 响应结构：{ret:0, response:{task_list:[...]}}
+        NSDictionary *response = resp[@"response"];
+        if (![response isKindOfClass:[NSDictionary class]]) {
+            qqlog(@"[taskList] response 非字典: %@", resp);
+            return nil;
+        }
+        NSArray *list = response[@"task_list"];
+        if (![list isKindOfClass:[NSArray class]]) {
+            qqlog(@"[taskList] task_list 非数组，keys=%@", response.allKeys);
+            return nil;
+        }
+        qqlog(@"[taskList] 共 %lu 个任务", (unsigned long)list.count);
+        return list;
+    } @catch (NSException *e) {
+        qqlog(@"[taskList] 异常 %@", e);
+    }
+    return nil;
+}
+
+// ── ExecAct 领奖（act.qzone.qq.com 真身域名）──
+//   普通任务 body：{SubActId, ClientPlat, Aid, EnteranceId, ActReqData}
+static BOOL execActClaim(NSDictionary *task, NSString *uin, NSString *qzonePskey) {
+    @try {
+        NSString *awardRuleId = task[@"award_rule_id"] ?: @"";
+        NSString *taskId = task[@"task_id"] ?: @"";
+        NSString *businessTaskId = task[@"business_task_id"] ?: @"";
+        if (!awardRuleId || awardRuleId.length == 0) {
+            qqlog(@"[ExecAct] 任务无 award_rule_id，跳过: %@", task);
+            return NO;
+        }
+        int gtk = hash33(qzonePskey);
+        NSString *url = [NSString stringWithFormat:@"https://act.qzone.qq.com/v2/vip/tx/trpc/subact/ExecAct?g_tk=%d", gtk];
+        NSString *cookie = [NSString stringWithFormat:@"uin=%@; p_uin=%@; p_skey=%@", uin, uin, qzonePskey];
+
+        // ActReqData 是字符串化的 JSON
+        NSDictionary *actReq = @{
+            @"sub_act_id": awardRuleId,
+            @"task_id": taskId,
+            @"uid": uin,
+            @"business_task_id": businessTaskId
+        };
+        NSData *reqJson = [NSJSONSerialization dataWithJSONObject:actReq options:0 error:nil];
+        NSString *reqStr = [[NSString alloc] initWithData:reqJson encoding:NSUTF8StringEncoding];
+
+        NSDictionary *body = @{
+            @"SubActId": awardRuleId,
+            @"ClientPlat": @1,
+            @"Aid": @"",
+            @"EnteranceId": @"",
+            @"ActReqData": reqStr ?: @"{}"
+        };
+        NSDictionary *resp = httpPostJSON(url, body, cookie, 15);
+        if (!resp) {
+            qqlog(@"[ExecAct] %@ 无响应", awardRuleId);
+            return NO;
+        }
+        int code = [resp[@"Code"] intValue];
+        qqlog(@"[ExecAct] %@ Code=%d Msg=%@", awardRuleId, code, resp[@"Msg"] ?: @"");
+        return code == 0;
+    } @catch (NSException *e) {
+        qqlog(@"[ExecAct] 异常 %@", e);
+    }
+    return NO;
+}
+
+// ── 福利社领券完整链：GetBenefitsDetail → ExecAct → GetUserItemsByBenefits ──
+static BOOL benefitClaimChain(NSString *uin, NSString *vipPskey) {
+    @try {
+        int gtk = hash33(vipPskey);
+        NSString *cookie = [NSString stringWithFormat:@"uin=%@; p_uin=%@; p_skey=%@", uin, uin, vipPskey];
+        NSString *base = @"https://club.vip.qq.com/mono/api/trpc/qqva/vipopen_benefits_center_server/benefit_service/Vipopen";
+
+        // 1. GetBenefitsDetail → 取 getSubactId
+        NSString *url1 = [NSString stringWithFormat:@"%@/GetBenefitsDetail?ADTAG=level&g_tk=%d", base, gtk];
+        NSDictionary *detail = httpPostJSON(url1, @{@"data": @{@"benefits_id": @47778}}, cookie, 15);
+        NSString *subactId = nil;
+        if (detail) {
+            NSDictionary *data = detail[@"data"];
+            NSArray *benefits = data[@"benefits"];
+            if ([benefits isKindOfClass:[NSArray class]] && benefits.count > 0) {
+                NSDictionary *first = benefits[0];
+                NSDictionary *tianxuan = first[@"tianxuanAct"];
+                subactId = tianxuan[@"getSubactId"];
+                qqlog(@"[benefit] GetBenefitsDetail → getSubactId=%@", subactId ?: @"nil");
+            } else {
+                qqlog(@"[benefit] GetBenefitsDetail 响应无 benefits: %@", detail);
             }
-            qqlog(@"[QQWebVC] viewDidAppear 绑定 webview=%@ tracked=YES", NSStringFromClass([wv class]));
+        } else {
+            qqlog(@"[benefit] GetBenefitsDetail 无响应");
+        }
+
+        // 2. ExecAct 领券
+        if (subactId && subactId.length > 0) {
+            int gtk2 = hash33(vipPskey);
+            NSString *execUrl = [NSString stringWithFormat:@"https://act.qzone.qq.com/v2/vip/tx/trpc/subact/ExecAct?g_tk=%d", gtk2];
+            NSDictionary *actReq = @{
+                @"send_type": @"2",
+                @"ext_recommend_source": @1,
+                @"appid": @"pg_qqvip_benefit",
+                @"page_id": @"pg_new_benefit_homepage",
+                @"date": @"0",
+                @"sub_id": @""
+            };
+            NSData *reqJson = [NSJSONSerialization dataWithJSONObject:actReq options:0 error:nil];
+            NSString *reqStr = [[NSString alloc] initWithData:reqJson encoding:NSUTF8StringEncoding];
+            NSDictionary *body = @{
+                @"SubActId": subactId,
+                @"ActReqData": reqStr,
+                @"ReportInfo": @"{\"enteranceId\":\"level\"}"
+            };
+            NSDictionary *resp = httpPostJSON(execUrl, body, cookie, 15);
+            int code = resp ? [resp[@"Code"] intValue] : -999;
+            qqlog(@"[benefit] ExecAct Code=%d Msg=%@", code, resp[@"Msg"] ?: @"");
+            if (code != 0) return NO;
+
+            // 3. 领后确认
+            NSString *url3 = [NSString stringWithFormat:@"%@/GetUserItemsByBenefits?ADTAG=level&g_tk=%d", base, gtk];
+            NSDictionary *confirm = httpPostJSON(url3, @{@"data": @{@"benefits_id": @47778}}, cookie, 15);
+            qqlog(@"[benefit] GetUserItemsByBenefits %@", confirm ? @"ok" : @"无响应");
+            return YES;
         }
     } @catch (NSException *e) {
-        qqlog(@"[QQWebVC] viewDidAppear 异常: %@", e);
+        qqlog(@"[benefit] 异常 %@", e);
+    }
+    return NO;
+}
+
+// ── 一键做任务主流程（后台队列执行，不阻塞 UI）──
+static void runAutoTasks(void) {
+    if (_taskRunning) {
+        qqlog(@"[auto] 任务已在运行中");
+        return;
+    }
+    _taskRunning = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            qqlog(@"\n========== 一键做任务开始 ==========");
+            // 1. 取 uin + 各域 p_skey
+            NSString *uin = getCurrentUin();
+            NSString *tiPskey = getPskey(@"ti.qq.com", uin, 1);
+            if (!tiPskey) {
+                // fallback keyType=0
+                tiPskey = getPskey(@"ti.qq.com", uin, 0);
+            }
+            if (!tiPskey) {
+                qqlog(@"[auto] ✗ 拿不到 ti 域 p_skey，无法继续");
+                _taskRunning = NO;
+                return;
+            }
+            NSString *qzonePskey = getPskey(@"qzone.qq.com", uin, 1);
+            NSString *vipPskey = getPskey(@"vip.qq.com", uin, 1);
+            if (!qzonePskey) qzonePskey = getPskey(@"qzone.qq.com", uin, 0);
+            if (!vipPskey) vipPskey = getPskey(@"vip.qq.com", uin, 0);
+            qqlog(@"[auto] uin=%@ ti_p_skey_len=%lu qzone_p_skey_len=%lu vip_p_skey_len=%lu",
+                  uin, (unsigned long)tiPskey.length,
+                  (unsigned long)qzonePskey.length, (unsigned long)vipPskey.length);
+
+            // 2. 拉任务列表
+            int retCode = 0;
+            NSArray *taskList = fetchTaskList(uin, tiPskey, &retCode);
+            if (!taskList || taskList.count == 0) {
+                qqlog(@"[auto] ✗ 任务列表为空 (ret=%d)", retCode);
+                _taskRunning = NO;
+                return;
+            }
+
+            // 3. 遍历任务执行
+            int claimOK = 0, claimFail = 0, pending = 0, done = 0;
+            for (NSDictionary *task in taskList) {
+                if (![task isKindOfClass:[NSDictionary class]]) continue;
+                NSString *title = task[@"title"] ?: task[@"task_name"] ?: @"?";
+                NSNumber *statusNum = task[@"status"];
+                int status = statusNum ? [statusNum intValue] : -1;
+                NSString *taskId = [task[@"task_id"] description] ?: @"";
+                qqlog(@"[task] id=%@ title=%@ status=%d", taskId, title, status);
+
+                if (status == 2) {  // 可领取
+                    qqlog(@"[task] 🎁 可领取 → 尝试领奖: %@", title);
+                    BOOL ok = NO;
+                    // 福利社任务特判
+                    BOOL isBenefit = [title containsString:@"福利社"] || [title containsString:@"领券"] ||
+                        ([task[@"award_rule_id"] isKindOfClass:[NSString class]] &&
+                         [(NSString *)task[@"award_rule_id"] containsString:@"139705"]);
+                    if (isBenefit) {
+                        ok = benefitClaimChain(uin, vipPskey ?: qzonePskey);
+                    } else {
+                        ok = execActClaim(task, uin, qzonePskey ?: tiPskey);
+                    }
+                    if (ok) claimOK++; else claimFail++;
+                    qqlog(@"[task] %@ %@", title, ok ? @"✅ 领奖成功" : @"❌ 领奖失败");
+                } else if (status == 1) {  // 已完成未领
+                    qqlog(@"[task] ⏳ 已完成未领 → 尝试领奖: %@", title);
+                    BOOL ok = execActClaim(task, uin, qzonePskey ?: tiPskey);
+                    if (ok) claimOK++; else claimFail++;
+                    qqlog(@"[task] %@ %@", title, ok ? @"✅ 领奖成功" : @"❌ 领奖失败");
+                } else if (status == 0) {  // 未完成
+                    pending++;
+                    qqlog(@"[task] 📋 未完成（需手动/UI 操作）: %@", title);
+                } else if (status == 3) {  // 已领取
+                    done++;
+                    qqlog(@"[task] ✅ 已领取: %@", title);
+                }
+            }
+
+            // 4. 汇总
+            qqlog(@"[auto] ══ 汇总: 领奖成功=%d 失败=%d 未完成=%d 已领取=%d ══", claimOK, claimFail, pending, done);
+            qqlog(@"[auto] 未完成任务需要打开等级页手动操作，完成后再次点「一键做任务」即可领奖");
+        } @catch (NSException *e) {
+            qqlog(@"[auto] 主流程异常: %@", e);
+        }
+        _taskRunning = NO;
+    });
+}
+
+// ══════════════════════════════════════════
+//  任务日志面板 UI（悬浮窗内嵌，不干扰 QQ）
+// ══════════════════════════════════════════
+static void appendLogView(NSString *msg) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!_logView) return;
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"HH:mm:ss";
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [df stringFromDate:[NSDate date]], msg];
+        NSString *newText = [(_logTextView.text ?: @"") stringByAppendingString:line];
+        if (newText.length > 8000) {
+            newText = [newText substringFromIndex:newText.length - 8000];
+        }
+        _logTextView.text = newText;
+        [_logTextView scrollRangeToVisible:NSMakeRange(_logTextView.text.length, 0)];
+    });
+}
+
+static void showLogPanel(void) {
+    if (_logView || !_floatWindow) return;
+    CGRect frame = _floatWindow.bounds;
+    CGFloat w = MIN(300, frame.size.width - 20);
+    CGFloat h = MIN(320, frame.size.height * 0.4);
+    UIView *view = [[UIView alloc] initWithFrame:CGRectMake(frame.size.width - w - 8, frame.size.height - h - 90, w, h)];
+    view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
+    view.layer.cornerRadius = 10;
+    view.layer.masksToBounds = YES;
+    view.userInteractionEnabled = YES;
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(4, 4, w - 8, h - 44)];
+    tv.backgroundColor = [UIColor clearColor];
+    tv.textColor = [UIColor whiteColor];
+    tv.font = [UIFont systemFontOfSize:11];
+    tv.editable = NO;
+    tv.selectable = NO;
+    tv.text = @"任务日志：\n";
+    _logTextView = tv;
+    [view addSubview:tv];
+
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    closeBtn.frame = CGRectMake(w - 44, h - 36, 36, 28);
+    [closeBtn setTitle:@"关闭" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    [closeBtn addTarget:[UIApplication sharedApplication] action:@selector(_closeLogPanel:) forControlEvents:UIControlEventTouchUpInside];
+    [view addSubview:closeBtn];
+
+    _logView = view;
+    [_floatWindow addSubview:_logView];
+}
+
+// 提前声明
+@interface UIApplication (QQFloatBallLog)
+- (void)_closeLogPanel:(UIButton *)sender;
+@end
+
+%hook UIApplication
+%new
+- (void)_closeLogPanel:(UIButton *)sender {
+    if (_logView) {
+        [_logView removeFromSuperview];
+        _logView = nil;
+        _logTextView = nil;
     }
 }
-
-- (void)loadRequest:(NSURLRequest *)request {
-    @try {
-        NSString *url = request.URL.absoluteString ?: @"";
-        qqlog(@"[QQWebVC] loadRequest: %@", url);
-        // 阶段2：只追踪，不拦截。webview 可能在 loadRequest 时还未创建，不强行访问 view
-        if (isTaskCenterPage(url)) {
-            _inTaskCenter = YES;
-        }
-    } @catch (NSException *e) {}
-    %orig(request);
-}
-
-- (void)setUrl:(NSString *)url {
-    @try {
-        NSString *u = url ?: @"";
-        // 阶段2：只追踪状态，不拦截任何跳转（Kuikly 正常渲染）
-        if (isTaskCenterPage(u)) {
-            _inTaskCenter = YES;
-        } else if (u.length > 0 && ![u containsString:@"qqlevel"]) {
-            _inTaskCenter = NO;
-        }
-        qqlog(@"[QQWebVC] setUrl: %@", u);
-    } @catch (NSException *e) {}
-    return %orig(url);
-}
-
 %end
 
 // ── 枚举 ObjC 类（找网络桥接类，只读安全）──
@@ -827,87 +650,8 @@ static void dumpPSKeys(void) {
     @try {
         id skey = ((id (*)(id, SEL))objc_msgSend)(mgr, NSSelectorFromString(@"getRealSig_SKEYStr"));
         if (skey) qqlog(@"[pskey] SKEY = %@", skey);
-
-        // ── bkn 计算（标准算法：skey 逐字符 hash）──
-        // 只有 skey 非空才计算，否则无意义
-        NSString *s = [skey isKindOfClass:[NSString class]] ? skey : nil;
-        if (s.length > 0) {
-            unsigned int hashV = 5381;
-            for (NSUInteger i = 0; i < s.length; i++) {
-                hashV = hashV + ((hashV << 5) & 0x7FFFFFFF) + [s characterAtIndex:i];
-            }
-            int bkn = hashV & 0x7FFFFFFF;
-            qqlog(@"[pskey] BKN = %d (skey长度=%lu)", bkn, (unsigned long)s.length);
-        } else {
-            qqlog(@"[pskey] SKEY 为空，跳过 bkn 计算");
-        }
     } @catch (NSException *e) {
         qqlog(@"[pskey] SKEY 异常 %@", e);
-    }
-}
-
-// ── hook Kuikly 请求模型：抓等级页真实请求 URL/cmd/body（只读日志）──
-%hook QQKuiklyHTTPRequestItem
-- (void)setUrl:(NSString *)url {
-    if (_captureEnabled) {
-        // 也读 body（QQKuiklyBaseRequestItem 的属性，forward declaration 用 objc_msgSend 避免编译错误）
-        NSString *body = @"";
-        @try {
-            id b = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"body"));
-            if ([b isKindOfClass:[NSString class]]) body = (NSString *)b;
-            else if ([b isKindOfClass:[NSDictionary class]]) {
-                NSData *jd = [NSJSONSerialization dataWithJSONObject:b options:0 error:nil];
-                if (jd) body = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding];
-            }
-            if (body.length > 300) body = [body substringToIndex:300];
-        } @catch (NSException *e) {}
-        qqlog(@"[kuikly] HTTPRequest url=%@ body=%@", url, body);
-    }
-    %orig;
-}
-%end
-
-%hook QQKuiklySSORequestItem
-- (void)setCmd:(NSString *)cmd {
-    if (_captureEnabled) {
-        qqlog(@"[kuikly] SSORequest cmd=%@", cmd);
-    }
-    %orig;
-}
-%end
-
-
-static void dumpKeyClassMethods(void) {
-    NSArray *keyClasses = @[
-        @"QQLoginPSKeyManager", @"QQLoginPSKeyDataSource", @"QQLoginPSKeyRefreshItem",
-        @"QQKuiklyHTTPRequestItem", @"QQKuiklySSORequestItem", @"QQKuiklyBaseRequestItem",
-        @"QQWebSSoSession", @"QQHttpClient", @"QQHttpClientSession", @"QQHttpClientSessionWrapper",
-        @"QQNetworkEngine", @"QQCRHttpRequest", @"QQWTLogin", @"QQLoginAccountKeyChainModel",
-        @"QQModelObject_tencent_im_oidb_lib_LoginSig", @"QQNetworkCommonImp",
-        @"QQWebViewController", @"QQWebView", @"QQWKWebView", @"QQWebViewUtils", @"QQWebViewPool",
-        @"QQWebViewPluginBase", @"QQWebViewBussinessPluginBase",
-    ];
-    for (NSString *cn in keyClasses) {
-        Class cls = NSClassFromString(cn);
-        if (!cls) {
-            qqlog(@"[method] %@ 不存在", cn);
-            continue;
-        }
-        qqlog(@"[method] ==== %@ ====", cn);
-        // 类方法
-        unsigned int mc = 0;
-        Method *mets = class_copyMethodList(object_getClass(cls), &mc);
-        for (unsigned int i = 0; i < mc; i++) {
-            qqlog(@"[method] +[%@ %@]", cn, NSStringFromSelector(method_getName(mets[i])));
-        }
-        free(mets);
-        // 实例方法
-        unsigned int ic = 0;
-        Method *imets = class_copyMethodList(cls, &ic);
-        for (unsigned int i = 0; i < ic; i++) {
-            qqlog(@"[method] -[%@ %@]", cn, NSStringFromSelector(method_getName(imets[i])));
-        }
-        free(imets);
     }
 }
 
@@ -976,284 +720,89 @@ static void dumpKeyClassMethods(void) {
     [ball addGestureRecognizer:pan];
 
     [floatWindow addSubview:ball];
-
-    // ── 任务日志面板（悬浮球下方小黑条，实时显示任务进度）──
-    UILabel *logLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, screenBounds.size.height - 140, screenBounds.size.width - 16, 120)];
-    logLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-    logLabel.textColor = [UIColor whiteColor];
-    logLabel.font = [UIFont systemFontOfSize:11];
-    logLabel.numberOfLines = 0;
-    logLabel.textAlignment = NSTextAlignmentLeft;
-    logLabel.layer.cornerRadius = 8;
-    logLabel.layer.masksToBounds = YES;
-    logLabel.hidden = YES;  // 默认隐藏，做任务时显示
-    _logLabel = logLabel;
-    [floatWindow addSubview:logLabel];
-
     floatWindow.hidden = NO;
 }
 
-// ── 打开等级页面 WebView（带自动注入领取脚本）──
-static void openTaskCenterWebView(void) {
-    @try {
-        // 提前打标，保证打开流程中任何 QQ 内部清空/跳转都能被及时拦截
-        _inTaskCenter = YES;
-        qqlogUI(@"正在打开等级页…");
-        if (_logLabel) _logLabel.hidden = NO;
-
-        Class cls = NSClassFromString(@"QQWebViewController");
-        if (!cls) { qqlog(@"[openTaskCenter] QQWebViewController 不存在"); _inTaskCenter = NO; return; }
-        NSString *urlStr = @"https://ti.qq.com/qqlevel/task-center?version=1&tab=1&source=38";
-
-        id vc = nil;
-        // 方案1：initWith:forStyle:
-        SEL initSel = NSSelectorFromString(@"initWith:forStyle:");
-        NSMethodSignature *sig = [cls instanceMethodSignatureForSelector:initSel];
-        if (sig && [sig numberOfArguments] >= 4) {
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            id alloc = [cls alloc];
-            [inv setTarget:alloc];
-            [inv setSelector:initSel];
-            __unsafe_unretained NSString *urlArg = urlStr;
-            [inv setArgument:&urlArg atIndex:2];
-            const char *t3 = [sig getArgumentTypeAtIndex:3];
-            qqlog(@"[openTaskCenter] initWith:forStyle: arg3 type=%s", t3);
-            if (t3[0] == '@') {
-                __unsafe_unretained id styleArg = @(0);
-                [inv setArgument:&styleArg atIndex:3];
-            } else {
-                NSInteger style = 0;
-                [inv setArgument:&style atIndex:3];
-            }
-            [inv invoke];
-            __unsafe_unretained id ret = nil;
-            [inv getReturnValue:&ret];
-            vc = ret;
-        }
-        // 方案2：兜底尝试 initWithURL: 或通用 init + setUrl
-        if (!vc) {
-            SEL altSel = NSSelectorFromString(@"initWithURL:");
-            NSMethodSignature *altSig = [cls instanceMethodSignatureForSelector:altSel];
-            if (altSig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:altSig];
-                id alloc = [cls alloc];
-                [inv setTarget:alloc];
-                [inv setSelector:altSel];
-                __unsafe_unretained NSString *urlArg = urlStr;
-                [inv setArgument:&urlArg atIndex:2];
-                [inv invoke];
-                __unsafe_unretained id ret = nil;
-                [inv getReturnValue:&ret];
-                vc = ret;
-                qqlog(@"[openTaskCenter] 兜底 initWithURL: 创建%@", vc ? @"成功" : @"失败");
-            }
-        }
-        if (!vc) {
-            qqlog(@"[openTaskCenter] 创建 QQWebViewController 失败");
-            _inTaskCenter = NO;
-            return;
-        }
-        qqlog(@"[openTaskCenter] 已创建 QQWebViewController: %@", vc);
-
-        // push 到 QQ 根导航（QQ 的 tabBar 内）
-        BOOL pushed = NO;
-        SEL rootSel = NSSelectorFromString(@"rootTabBarController");
-        if ([cls respondsToSelector:rootSel]) {
-            @try {
-                id tabBar = ((id (*)(id, SEL))objc_msgSend)(cls, rootSel);
-                if ([tabBar respondsToSelector:NSSelectorFromString(@"selectedViewController")]) {
-                    id selVC = [tabBar selectedViewController];
-                    if ([selVC isKindOfClass:[UINavigationController class]]) {
-                        [(UINavigationController *)selVC pushViewController:(UIViewController *)vc animated:YES];
-                        qqlog(@"[openTaskCenter] push 到 QQ 导航成功");
-                        pushed = YES;
-                    }
-                }
-            } @catch (NSException *e2) {
-                qqlog(@"[openTaskCenter] rootTabBarController push 异常: %@", e2);
-            }
-        }
-        if (!pushed) {
-            // 兜底：悬浮窗 present
-            UIViewController *presenter = _floatWindow.rootViewController;
-            if (presenter) {
-                UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:(UIViewController *)vc];
-                [presenter presentViewController:nav animated:YES completion:^{
-                    qqlog(@"[openTaskCenter] present 兜底完成");
-                }];
-                pushed = YES;
-            }
-        }
-        if (!pushed) {
-            // 最后兜底：找活跃 scene 的最顶层 VC present
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *ws = (UIWindowScene *)scene;
-                    if (ws.activationState == UISceneActivationStateForegroundActive) {
-                        UIViewController *topVC = ws.windows.firstObject.rootViewController;
-                        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
-                        if (topVC) {
-                            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:(UIViewController *)vc];
-                            [topVC presentViewController:nav animated:YES completion:nil];
-                            qqlog(@"[openTaskCenter] scene 顶层 VC present 兜底");
-                            pushed = YES;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if (!pushed) {
-            qqlog(@"[openTaskCenter] 所有 push/present 方案失败");
-            _inTaskCenter = NO;
-        }
-    } @catch (NSException *e) {
-        qqlog(@"[openTaskCenter] 异常: %@", e);
-        _inTaskCenter = NO;
-    }
-}
-
 // ──────────────────────────────────────────
-//  点击弹窗（开始/停止抓包入口）
+//  点击弹窗（抓包 / 一键做任务 / 任务日志）
 // ──────────────────────────────────────────
 %new
 - (void)_floatBallTapped:(UIButton *)sender {
-    NSString *status = @"○ 未抓包";
-    if (_captureEnabled && !_captureOnlyTasks) status = @"● 全量抓包中";
-    else if (_captureEnabled && _captureOnlyTasks) status = @"● 等级抓包中";
-    // ── 扫描所有 scene/window 找任意 webview 的锁状态，给用户直观提示 ──
-    NSMutableString *lockedInfo = [NSMutableString string];
-    NSInteger lockedCount = 0;
-    @try {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *win in [(UIWindowScene *)scene windows]) {
-                WKWebView *wvFound = findWKWebViewInView(win);
-                if (wvFound && [wvFound _qqfb_injectRunning]) {
-                    lockedCount++;
-                    [lockedInfo appendFormat:@"  · %@ 锁死\n", NSStringFromClass([wvFound class])];
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-    NSString *msg;
-    if (lockedCount > 0) {
-        msg = [NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止\n\n⚠️ 检测到 %ld 个 WebView 注入死锁！\n%@点 🔧 强制解锁 可恢复",
-               status, (long)lockedCount, lockedInfo];
-    } else {
-        msg = [NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止", status];
-    }
-
+    NSString *status = _captureEnabled ? @"● 抓包中" : @"○ 未抓包";
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"悬浮球"
-                                                                   message:msg
+                                                                   message:[NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止", status]
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    // ── 抓包双按钮：全量抓包 / 等级抓包（点同一按钮 = 开启/停止，标题实时显示状态）──
-    NSString *fullTitle = _captureEnabled && !_captureOnlyTasks ? @"📡 全量抓包（进行中）" : @"📡 全量抓包";
-    NSString *taskTitle = _captureEnabled && _captureOnlyTasks ? @"🎯 等级抓包（进行中）" : @"🎯 等级抓包";
-    [alert addAction:[UIAlertAction actionWithTitle:fullTitle
-                                              style:(_captureEnabled && !_captureOnlyTasks) ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
+    NSString *actionTitle = _captureEnabled ? @"停止抓包" : @"开始抓包";
+    [alert addAction:[UIAlertAction actionWithTitle:actionTitle
+                                              style:_captureEnabled ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        if (_captureEnabled && !_captureOnlyTasks) {
-            // 已是全量抓包中 → 停止
-            _captureEnabled = NO;
-            qqlog(@"[action] 全量抓包 停止");
-            qqlogUI(@"已停止全量抓包");
-        } else {
-            // 开启全量抓包
-            _captureEnabled = YES;
-            _captureOnlyTasks = NO;
-            qqlog(@"[action] 全量抓包 开始");
-            qqlogUI(@"已开启全量抓包（做任务的所有请求都会记录）");
-            if (_captureEnabled) {
-                dumpObjCClasses();
-                dumpWebKitCookies();
-                dumpKeyClassMethods();
-                dumpPSKeys();
-            }
+        _captureEnabled = !_captureEnabled;
+        qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
+        if (_captureEnabled) {
+            dumpObjCClasses();
+            dumpWebKitCookies();
+            dumpPSKeys();
         }
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:taskTitle
-                                              style:(_captureEnabled && _captureOnlyTasks) ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        if (_captureEnabled && _captureOnlyTasks) {
-            // 已是等级抓包中 → 停止
-            _captureEnabled = NO;
-            qqlog(@"[action] 等级抓包 停止");
-            qqlogUI(@"已停止等级抓包");
-        } else {
-            // 开启等级抓包
-            _captureEnabled = YES;
-            _captureOnlyTasks = YES;
-            qqlog(@"[action] 等级抓包 开始");
-            qqlogUI(@"已开启等级抓包（只记录等级任务相关请求）");
-            if (_captureEnabled) {
-                dumpObjCClasses();
-                dumpWebKitCookies();
-                dumpKeyClassMethods();
-                dumpPSKeys();
-            }
-        }
-    }]];
-    // 一键做任务（阶段1：先探测三件套，再走原 WebView 逻辑）
+    // 一键做任务：HTTP 直连领奖（不再依赖 WebView）
     [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键做任务"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
-        qqlog(@"[action] 一键做任务 -> 探测三件套 + 打开等级页");
-        _autoStop = NO;
-        dumpPSKeys();
-        openTaskCenterWebView();
-    }]];
-    // 停止任务（阶段2：置停止标记，任务循环检测到后立即停止）
-    [alert addAction:[UIAlertAction actionWithTitle:@"⏹ 停止任务"
-                                              style:UIAlertActionStyleDestructive
-                                            handler:^(UIAlertAction *action) {
-        _autoStop = YES;
-        qqlog(@"[action] ⏹ 停止任务（标记已置位，任务循环将在下一轮检测到并停止）");
-        qqlogUI(@"已请求停止任务…");
-    }]];
-    // 手动兜底：方向③ —— 暴力解锁所有 WKWebView 的 injectRunning / Tracked 以及全局状态
-    if (lockedCount > 0) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"🔧 强制解锁死锁"
-                                                  style:UIAlertActionStyleDestructive
-                                                handler:^(UIAlertAction *action) {
-            NSInteger unlocked = 0;
-            @try {
-                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                    if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-                    for (UIWindow *win in [(UIWindowScene *)scene windows]) {
-                        // 递归扫整个 window 视图树（含 present 的 VC.view）
-                        WKWebView *wv = nil;
-                        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
-                        while (queue.count > 0 && !wv) {
-                            UIView *cur = queue.firstObject;
-                            [queue removeObjectAtIndex:0];
-                            if ([cur isKindOfClass:[WKWebView class]]) {
-                                wv = (WKWebView *)cur;
-                            } else {
-                                [queue addObjectsFromArray:cur.subviews];
+        qqlog(@"[action] 一键做任务启动");
+        [self _closeLogPanel:nil];
+        showLogPanel();
+        appendLogView(@"⚡ 一键做任务启动…");
+        runAutoTasks();
+        // 日志面板轮询刷新（从任务启动时的文件偏移读起）
+        NSInteger startOffset = [[[NSFileManager defaultManager] attributesOfItemAtPath:qqlogPath() error:nil][NSFileSize] longValue] ?: 0;
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+            NSInteger lastOffset = startOffset;
+            for (int i = 0; i < 240 && _taskRunning; i++) {
+                @try {
+                    NSData *data = [NSData dataWithContentsOfFile:qqlogPath()];
+                    if (data && data.length > lastOffset) {
+                        NSString *tail = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                        NSString *newPart = [tail substringFromIndex:MIN(lastOffset, tail.length)];
+                        NSArray *lines = [newPart componentsSeparatedByString:@"\n"];
+                        for (NSString *ln in lines) {
+                            NSString *trimmed = [ln stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                            if (trimmed.length > 0 && [trimmed containsString:@"["]) {
+                                appendLogView(trimmed);
                             }
                         }
-                        // 也扫描 presented VC 的 view
-                        UIViewController *topVC = win.rootViewController;
-                        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
-                        if (!wv && topVC.view) wv = findWKWebViewInView(topVC.view);
-
-                        if (wv) {
-                            if ([wv _qqfb_injectRunning]) unlocked++;
-                            [wv _qqfb_setInjectRunning:NO];
-                            [wv _qqfb_setTracked:NO];
-                        }
+                        lastOffset = data.length;
                     }
-                }
-            } @catch (NSException *e) {
-                qqlog(@"[action] 强制解锁异常: %@", e);
+                } @catch (NSException *e) {}
+                [NSThread sleepForTimeInterval:0.5];
             }
-            _inTaskCenter = NO;
-            qqlog(@"[action] 🔧 强制解锁完成，共解锁 %ld 个死锁 webview", (long)unlocked);
-            qqlogUI([NSString stringWithFormat:@"已解锁 %ld 个死锁，可重试一键任务", (long)unlocked]);
-            if (_logLabel) _logLabel.hidden = NO;
-        }]];
-    }
+            if (_taskRunning) {
+                appendLogView(@"⏳ 任务仍在进行（可稍后再点一次）");
+            } else {
+                appendLogView(@"✅ 任务执行完毕");
+            }
+        });
+    }]];
+    // 打开等级页（Kuikly 原生）
+    [alert addAction:[UIAlertAction actionWithTitle:@"📖 打开等级页"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        qqlog(@"[action] 打开等级页");
+        // 用 QQ 深链打开等级页（走 Kuikly 原生渲染）
+        NSURL *url = [NSURL URLWithString:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=aHR0cHM6Ly90aS5xcS5jb20vcXFsZXZlbC9pbmRleD92ZXJzaW9uPTEmdGFiPTYmc291cmNlPTE1"];
+        if (url) {
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        }
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"📋 任务日志"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        if (_logView) {
+            [self _closeLogPanel:nil];
+        } else {
+            showLogPanel();
+            appendLogView(@"任务日志面板已打开");
+        }
+    }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消"
                                               style:UIAlertActionStyleCancel
                                             handler:nil]];
@@ -1312,31 +861,15 @@ static void openTaskCenterWebView(void) {
 // ── 构造器：dylib 加载即重试创建悬浮球（不依赖 setDelegate hook）──
 __attribute__((constructor))
 static void qqfloatball_ctor(void) {
-    // GCD 异步重试：QQ 冷启动时 scene 可能几秒内还没就绪，绝不阻塞主线程
-    __block int remaining = 15;
-    void (^ __block trySetup)(void);
-    trySetup = [^void(void) {
-        @autoreleasepool {
-            if (_floatBall || remaining <= 0) {
-                trySetup = nil;
-                return;
-            }
-            remaining--;
-            UIApplication *app = [UIApplication sharedApplication];
-            if (app && [app respondsToSelector:@selector(_setupFloatBall)]) {
-                [app _setupFloatBall];
-            }
-            if (!_floatBall && remaining > 0) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    if (trySetup) trySetup();
-                });
-            } else {
-                trySetup = nil;
-            }
-        }
-    } copy];
+    // 循环重试：QQ 冷启动时 scene 可能几秒内还没就绪
     dispatch_async(dispatch_get_main_queue(), ^{
-        trySetup();
+        for (int i = 0; i < 15; i++) {
+            UIApplication *app = [UIApplication sharedApplication];
+            if (!app) break;
+            [app _setupFloatBall];
+            if (_floatBall) break;  // 球建好就停
+            // 在主队列等 2 秒再试
+            [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.0]];
+        }
     });
 }

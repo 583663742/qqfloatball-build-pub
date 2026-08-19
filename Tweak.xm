@@ -803,11 +803,11 @@ static void dumpPSKeys(void) {
     @try {
         Class topWinMgr = NSClassFromString(@"QQFloatingWindowTopLevelWindowManager");
         if (topWinMgr && [topWinMgr respondsToSelector:@selector(acquireTopLevelWindowHighLevel:)]) {
-            [topWinMgr acquireTopLevelWindowHighLevel:floatWindow];
+            [(id)topWinMgr acquireTopLevelWindowHighLevel:floatWindow];
             // 双保险：参照 QQ 顶层窗口的实际 windowLevel，把我们的窗口提到它之上。
             // 不能 addSubview 嵌套 window（会破坏事件路由），只能比层级。
             double targetLevel = UIWindowLevelAlert + 1;   // 兜底 2001
-            id topWin = [topWinMgr topLevelWindow];
+            id topWin = [(id)topWinMgr topLevelWindow];
             if (topWin && [topWin isKindOfClass:[UIWindow class]]) {
                 double lv = [(UIWindow *)topWin windowLevel];
                 if (lv > 0) targetLevel = lv + 1;

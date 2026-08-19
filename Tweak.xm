@@ -11,6 +11,11 @@
 + (void)releaseTopLevelWindowHighLevel:(id)arg1;
 @end
 
+// QQFloatingBallUtil（头文件 032242）：topMostViewController 检测当前页面
+@interface QQFloatingBallUtil : NSObject
++ (id)topMostViewController;
+@end
+
 // ── 持有悬浮球窗口和按钮的强引用，防止 ARC 释放 ──
 static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
@@ -560,7 +565,9 @@ static void runAutoTasks(void) {
                         // 兜底：走 keyWindow rootViewController
                         UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
                         if (keyWin) topVC = keyWin.rootViewController;
-                        while (topVC && topVC.presentedViewController) topVC = topVC.presentedViewController;
+                        UIViewController *vc = topVC;
+                        while (vc && vc.presentedViewController) vc = vc.presentedViewController;
+                        topVC = vc;
                     }
                     if (topVC) {
                         Class kuiklyCls = NSClassFromString(@"QQKuiklyViewController");

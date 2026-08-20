@@ -537,75 +537,70 @@ __attribute__((unused)) static BOOL benefitClaimChain(NSString *uin, NSString *v
     return NO;
 }
 
-// ── 一键任务主流程（检测界面 → 检查任务状态 → 分类汇报；不做自动执行）──
-//   2026-08-19 用户定案：任务满足完成条件即自动完成，不存在"点击领取"。
-//   一键任务 = ①检测当前是否在任务页面 ②检查任务做了多少/哪些已完成/哪些不能做/哪些没做
+// ── 跳转任务页（jump_schema 可能是 mqqapi:// 深链 或 https:// h5 链接）──
+static void openJumpSchema(NSString *jump) {
+    if (!jump || jump.length == 0) return;
+    NSURL *url = nil;
+    if ([jump hasPrefix:@"https://"] || [jump hasPrefix:@"http://"]) {
+        // h5 链接必须用 mqqapi 容器打开（直接 openURL 会被 QQ 外部浏览器接管）
+        NSData *b64 = [[jump dataUsingEncoding:NSUTF8StringEncoding] base64EncodedDataWithOptions:0];
+        NSString *b64Str = [[NSString alloc] initWithData:b64 encoding:NSUTF8StringEncoding];
+        NSString *wrapped = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64Str];
+        url = [NSURL URLWithString:wrapped];
+    } else {
+        url = [NSURL URLWithString:jump];
+    }
+    if (url) {
+        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+    }
+}
+
+// ── 打开等级页（Kuikly 原生，tab=6 任务页）──
+static void openLevelPage(void) {
+    NSURL *url = [NSURL URLWithString:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=aHR0cHM6Ly90aS5xcS5jb20vcXFsZXZlbC9pbmRleD92ZXJzaW9uPTEmdGFiPTYmc291cmNlPTE1"];
+    if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+}
+
+// ── 在任务列表里按标题找任务状态（-1=不存在）──
+static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
+    for (NSDictionary *task in taskList) {
+        if (![task isKindOfClass:[NSDictionary class]]) continue;
+        NSString *t = task[@"title"] ?: @"";
+        if ([t isEqualToString:title]) {
+            NSNumber *s = task[@"status"];
+            return s ? [s intValue] : -1;
+        }
+    }
+    return -1;
+}
+
+// ── 提前声明：runAutoTasks 里调用（定义在其后）──
+static void autoTapAllWebViews(void);
+
+// ── 一键任务主流程：自动导航执行（v1.0.7 升级）──
+//   点一键 → 逐个打开未完成任务页 → 日志实时显示正在做哪个 → 自动检测状态变化
+//   能做自动完成的自动确认；需要手动操作的跳转页面引导用户点一下，然后自动验证
 static void runAutoTasks(void) {
     if (_taskRunning) {
-        qqlog(@"[auto] 检查已在运行中");
+        qqlog(@"[auto] 任务执行已在运行中");
         return;
     }
     _taskRunning = YES;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            qqlog(@"\n========== 一键任务检查开始 ==========");
+            qqlog(@"\n========== 一键任务自动执行开始 ==========");
 
-            // ══ ① 检测当前界面是否在做任务的页面（等级页/福利社页 = Kuikly 渲染）══
-            __block BOOL inTaskPage = NO;
-            __block NSString *pageDesc = @"无法获取";
-            dispatch_semaphore_t pageSem = dispatch_semaphore_create(0);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    id topVC = nil;
-                    Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
-                    if (utilCls && [utilCls respondsToSelector:@selector(topMostViewController)]) {
-                        topVC = [utilCls topMostViewController];
-                    }
-                    if (!topVC) {
-                        // 兜底：走 keyWindow rootViewController
-                        UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
-                        if (keyWin) topVC = keyWin.rootViewController;
-                        UIViewController *vc = topVC;
-                        while (vc && vc.presentedViewController) vc = vc.presentedViewController;
-                        topVC = vc;
-                    }
-                    if (topVC) {
-                        Class kuiklyCls = NSClassFromString(@"QQKuiklyViewController");
-                        if (kuiklyCls && [topVC isKindOfClass:kuiklyCls]) {
-                            NSString *page = [topVC valueForKey:@"pageName"];
-                            inTaskPage = YES;
-                            pageDesc = [NSString stringWithFormat:@"✅ 任务页面（Kuikly pageName=%@）", page ?: @"?"];
-                        } else {
-                            pageDesc = [NSString stringWithFormat:@"⚠️ 非任务页面（当前 VC=%@）", NSStringFromClass([topVC class])];
-                        }
-                    }
-                } @catch (NSException *e) {
-                    pageDesc = [NSString stringWithFormat:@"⚠️ 页面检测异常: %@", e.reason];
-                }
-                dispatch_semaphore_signal(pageSem);
-            });
-            dispatch_semaphore_wait(pageSem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
-            qqlog(@"[界面] %@", pageDesc);
-
-            if (!inTaskPage) {
-                qqlog(@"[界面] 自动跳转等级页…");
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    NSURL *url = [NSURL URLWithString:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=aHR0cHM6Ly90aS5xcS5jb20vcXFsZXZlbC9pbmRleD92ZXJzaW9uPTEmdGFiPTYmc291cmNlPTE1"];
-                    if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-                });
-            }
-
-            // ══ ② 取 uin + ti 域 p_skey（拉任务列表用）══
+            // ══ ① 取 uin + ti 域 p_skey ══
             NSString *uin = getCurrentUin();
             NSString *tiPskey = getPskey(@"ti.qq.com", uin, 1);
             if (!tiPskey) tiPskey = getPskey(@"ti.qq.com", uin, 0);
             if (!tiPskey) {
-                qqlog(@"[auto] ✗ 拿不到 ti 域 p_skey，无法检查任务");
+                qqlog(@"[auto] ✗ 拿不到 ti 域 p_skey，无法执行任务");
                 _taskRunning = NO;
                 return;
             }
 
-            // ══ ③ 拉任务列表 ══
+            // ══ ② 拉任务列表 ══
             int retCode = 0;
             NSArray *taskList = fetchTaskList(uin, tiPskey, &retCode);
             if (!taskList || taskList.count == 0) {
@@ -614,8 +609,9 @@ static void runAutoTasks(void) {
                 return;
             }
 
-            // ══ ④ 分类检查：已完成 / 未完成 / 不能做 ══
-            int doneCnt = 0, todoCnt = 0, cannotCnt = 0, unknownCnt = 0;
+            // ══ ③ 分类：未做且能做的任务（按原始顺序）══
+            NSMutableArray *todoTasks = [NSMutableArray array];
+            int doneCnt = 0, cannotCnt = 0;
             for (NSDictionary *task in taskList) {
                 if (![task isKindOfClass:[NSDictionary class]]) continue;
                 NSString *title = task[@"title"] ?: task[@"task_name"] ?: @"?";
@@ -625,7 +621,6 @@ static void runAutoTasks(void) {
                 NSString *extendStr = task[@"extend"] ?: @"";
                 NSString *jump = task[@"jump_schema"] ?: @"";
 
-                // 不能做判定：按钮文案含开通/充值/购买/升级/需会员 等门槛词；或扩展标记审核隐藏
                 BOOL isBlocked = NO;
                 if ([buttonText containsString:@"开通"] || [buttonText containsString:@"充值"] ||
                     [buttonText containsString:@"购买"] || [buttonText containsString:@"升级"] ||
@@ -636,25 +631,63 @@ static void runAutoTasks(void) {
 
                 if (isBlocked) {
                     cannotCnt++;
-                    qqlog(@"[task] ⛔ 不能做: %@ (按钮:%@)", title, buttonText);
+                    qqlog(@"[task] ⛔ 跳过不能做: %@ (按钮:%@)", title, buttonText);
                 } else if (status == 0 || status == -1) {
-                    todoCnt++;
-                    qqlog(@"[task] 📋 未做: %@ (按钮:%@%@)", title, buttonText,
-                          jump.length > 0 ? [NSString stringWithFormat:@" 跳转:%@", jump] : @"");
+                    if (jump.length > 0) {
+                        [todoTasks addObject:@{@"title": title, @"jump": jump}];
+                        qqlog(@"[task] ▶ 待执行: %@ (跳转:%@)", title, jump);
+                    } else {
+                        qqlog(@"[task] 📋 未做且无跳转: %@ (需手动在等级页完成)", title);
+                    }
                 } else if (status >= 1) {
                     doneCnt++;
                     qqlog(@"[task] ✅ 已完成: %@ (status=%d)", title, status);
+                }
+            }
+            qqlog(@"[auto] 本次待执行 %lu 个任务", (unsigned long)todoTasks.count);
+
+            if (todoTasks.count == 0) {
+                qqlog(@"[auto] ══ 汇总: 已完成=%d 跳过=%d 无待执行任务 ══", doneCnt, cannotCnt);
+                _taskRunning = NO;
+                return;
+            }
+
+            // ══ ④ 逐个自动执行：跳转页面 → 注入 JS 自动点按钮 → 验证状态 ══
+            int execDone = 0, execSkip = 0;
+            for (int i = 0; i < (int)todoTasks.count; i++) {
+                NSDictionary *item = todoTasks[i];
+                NSString *title = item[@"title"];
+                NSString *jump = item[@"jump"];
+                qqlog(@"[auto] ── [%d/%lu] 正在做: %@ ──", i + 1, (unsigned long)todoTasks.count, title);
+                qqlog(@"[auto] 跳转任务页 + 注入自动点击…");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    openJumpSchema(jump);
+                });
+                // 页面加载 + JS 自动点击：等待 6 秒后注入，共注入 3 轮
+                for (int round = 0; round < 3; round++) {
+                    [NSThread sleepForTimeInterval:6];
+                    autoTapAllWebViews();
+                }
+                [NSThread sleepForTimeInterval:4];
+
+                // 重新拉列表验证该任务是否完成
+                NSArray *freshList = fetchTaskList(uin, tiPskey, NULL);
+                int st = findTaskStatusByTitle(freshList ?: taskList, title);
+                if (st >= 1) {
+                    execDone++;
+                    qqlog(@"[auto] ✅ 完成: %@ (status=%d)", title, st);
                 } else {
-                    unknownCnt++;
-                    qqlog(@"[task] ❓ 状态未知: %@ (status=%d)", title, status);
+                    execSkip++;
+                    qqlog(@"[auto] ⏭ 未完成: %@ (status=%d，可能需更多操作，稍后可在等级页手动处理)", title, st);
                 }
             }
 
-            // ══ ⑤ 汇总 ══
-            qqlog(@"[auto] ══ 汇总: 已完成=%d 未做=%d 不能做=%d 未知=%d ══", doneCnt, todoCnt, cannotCnt, unknownCnt);
-            if (todoCnt > 0) {
-                qqlog(@"[auto] 未做任务可打开等级页手动完成（满足条件自动到账，无需领取）");
-            }
+            // ══ ⑤ 汇总 + 回到等级页 ══
+            qqlog(@"[auto] ══ 汇总: 完成=%d 未完成=%d 已完成=%d 跳过=%d ══", execDone, execSkip, doneCnt, cannotCnt);
+            qqlog(@"[auto] 自动跳回等级页…");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                openLevelPage();
+            });
         } @catch (NSException *e) {
             qqlog(@"[auto] 主流程异常: %@", e);
         }
@@ -728,6 +761,88 @@ static void showLogPanel(void) {
     }
 }
 %end
+
+// ══════════════════════════════════════════
+//  WKWebView JS 自动点击（v1.0.8 qsped 式全自动）
+//  打开任务页后主动轮询注入 JS 自动点「打卡/签到/领取/发布/完成」按钮
+//  qsped 安卓用 ADB tap 模拟点击，iOS 用 JS 注入等价实现
+// ══════════════════════════════════════════
+%hook WKWebView
+
+%new
+- (void)_qqfball_autoTapOnPage {
+    @try {
+        NSString *url = self.URL.absoluteString ?: @"";
+        qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
+        NSString *js =
+        @"(function(){"
+        "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','已打卡','领福利'];"
+        "  function tryClick(root){"
+        "    var els=root.querySelectorAll('button,a,div,span,p,li,input[type=button],input[type=submit]');"
+        "    for(var i=0;i<els.length;i++){"
+        "      var el=els[i];"
+        "      if(el.offsetParent===null) continue;"
+        "      var t=(el.innerText||el.textContent||el.value||'').trim();"
+        "      if(!t||t.length>12) continue;"
+        "      for(var k=0;k<kws.length;k++){"
+        "        if(t.indexOf(kws[k])!==-1){"
+        "          el.click();"
+        "          return '点击:'+t;"
+        "        }"
+        "      }"
+        "    }"
+        "    return '';"
+        "  }"
+        "  var r=tryClick(document);"
+        "  if(!r){ window.scrollTo(0,document.body.scrollHeight); setTimeout(function(){r=tryClick(document);},800); }"
+        "  return r;"
+        "})()";
+        [self evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+            if (err) {
+                qqlog(@"[autotap] JS 执行失败: %@", err.localizedDescription);
+            } else if (result) {
+                qqlog(@"[autotap] JS 结果: %@", result);
+            }
+        }];
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] 异常: %@", e);
+    }
+}
+%end
+
+// ── 遍历所有 window 找 WKWebView 注入自动点击 JS ──
+static void autoTapAllWebViews(void) {
+    @try {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSMutableArray *found = [NSMutableArray array];
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                collectWebViewsInView(win, found);
+            }
+            if (found.count == 0) {
+                qqlog(@"[autotap] 未找到 WKWebView（页面可能还在加载）");
+                return;
+            }
+            for (WKWebView *wv in found) {
+                if ([wv respondsToSelector:@selector(_qqfball_autoTapOnPage)]) {
+                    [wv _qqfball_autoTapOnPage];
+                }
+            }
+        });
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] 遍历异常: %@", e);
+    }
+}
+
+// ── 递归收集 WKWebView（工具函数，避开 WKWebView 头文件未声明问题）──
+static void collectWebViewsInView(UIView *view, NSMutableArray *outArr) {
+    if (!view) return;
+    if ([view isKindOfClass:NSClassFromString(@"WKWebView")]) {
+        [outArr addObject:view];
+    }
+    for (UIView *sub in view.subviews) {
+        collectWebViewsInView(sub, outArr);
+    }
+}
 
 // ── 枚举 ObjC 类（找网络桥接类，只读安全）──
 static void dumpObjCClasses(void) {

@@ -576,11 +576,6 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 
 // ── 提前声明：runAutoTasks 里调用（定义在其后）──
 static void autoTapAllWebViews(void);
-
-// ── WKWebView 扩展：声明 %new 方法 + 递归收集工具 ──
-@interface WKWebView (QQFloatBallAutoTap)
-- (void)_qqfball_autoTapOnPage;
-@end
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 
 // ── 一键任务主流程：自动导航执行（v1.0.7 升级）──
@@ -771,14 +766,29 @@ static void showLogPanel(void) {
 // ══════════════════════════════════════════
 //  WKWebView JS 自动点击（v1.0.8 qsped 式全自动）
 //  打开任务页后主动轮询注入 JS 自动点「打卡/签到/领取/发布/完成」按钮
-//  qsped 安卓用 ADB tap 模拟点击，iOS 用 JS 注入等价实现
+//  ⚠️ 不 hook WKWebView 类（swizzle 会导致 dylib 加载失败/球消失），
+//     全部用 NSClassFromString + performSelector 动态调用，加载零风险
 // ══════════════════════════════════════════
-%hook WKWebView
 
-%new
-- (void)_qqfball_autoTapOnPage {
+// ── 递归收集 WKWebView（不引用 WKWebView 头文件，防编译/加载依赖）──
+static void collectWebViewsInView(UIView *view, NSMutableArray *outArr) {
+    if (!view) return;
+    if ([view isKindOfClass:NSClassFromString(@"WKWebView")]) {
+        [outArr addObject:view];
+    }
+    for (UIView *sub in view.subviews) {
+        collectWebViewsInView(sub, outArr);
+    }
+}
+
+// ── 对单个 webView 注入自动点击 JS（纯动态调用，无 swizzle）──
+static void autoTapWebView(id webView) {
     @try {
-        NSString *url = self.URL.absoluteString ?: @"";
+        if (!webView) return;
+        SEL evalSel = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
+        if (![webView respondsToSelector:evalSel]) return;
+        NSURL *u = [webView valueForKey:@"URL"];
+        NSString *url = u.absoluteString ?: @"";
         qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
         NSString *js =
         @"(function(){"
@@ -803,18 +813,18 @@ static void showLogPanel(void) {
         "  if(!r){ window.scrollTo(0,document.body.scrollHeight); setTimeout(function(){r=tryClick(document);},800); }"
         "  return r;"
         "})()";
-        [self evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+        void (^handler)(id, NSError *) = ^(id result, NSError *err) {
             if (err) {
                 qqlog(@"[autotap] JS 执行失败: %@", err.localizedDescription);
             } else if (result) {
                 qqlog(@"[autotap] JS 结果: %@", result);
             }
-        }];
+        };
+        [webView performSelector:evalSel withObject:js withObject:handler];
     } @catch (NSException *e) {
-        qqlog(@"[autotap] 异常: %@", e);
+        qqlog(@"[autotap] 注入异常: %@", e);
     }
 }
-%end
 
 // ── 遍历所有 window 找 WKWebView 注入自动点击 JS ──
 static void autoTapAllWebViews(void) {
@@ -828,25 +838,12 @@ static void autoTapAllWebViews(void) {
                 qqlog(@"[autotap] 未找到 WKWebView（页面可能还在加载）");
                 return;
             }
-            for (WKWebView *wv in found) {
-                if ([wv respondsToSelector:@selector(_qqfball_autoTapOnPage)]) {
-                    [wv _qqfball_autoTapOnPage];
-                }
+            for (id wv in found) {
+                autoTapWebView(wv);
             }
         });
     } @catch (NSException *e) {
         qqlog(@"[autotap] 遍历异常: %@", e);
-    }
-}
-
-// ── 递归收集 WKWebView（工具函数，避开 WKWebView 头文件未声明问题）──
-static void collectWebViewsInView(UIView *view, NSMutableArray *outArr) {
-    if (!view) return;
-    if ([view isKindOfClass:NSClassFromString(@"WKWebView")]) {
-        [outArr addObject:view];
-    }
-    for (UIView *sub in view.subviews) {
-        collectWebViewsInView(sub, outArr);
     }
 }
 

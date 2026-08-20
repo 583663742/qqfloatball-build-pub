@@ -820,7 +820,18 @@ static void autoTapWebView(id webView) {
                 qqlog(@"[autotap] JS 结果: %@", result);
             }
         };
-        [webView performSelector:evalSel withObject:js withObject:handler];
+        // NSInvocation 调用 evaluateJavaScript:completionHandler:（绕开 ARC performSelector 警告）
+        NSMethodSignature *sig = [webView methodSignatureForSelector:evalSel];
+        if (sig) {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:webView];
+            [inv setSelector:evalSel];
+            [inv setArgument:&js atIndex:2];
+            [inv setArgument:&handler atIndex:3];
+            [inv invoke];
+        } else {
+            qqlog(@"[autotap] 无方法签名");
+        }
     } @catch (NSException *e) {
         qqlog(@"[autotap] 注入异常: %@", e);
     }

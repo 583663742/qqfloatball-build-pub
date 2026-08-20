@@ -577,6 +577,12 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 // ── 提前声明：runAutoTasks 里调用（定义在其后）──
 static void autoTapAllWebViews(void);
 
+// ── WKWebView 扩展：声明 %new 方法 + 递归收集工具 ──
+@interface WKWebView (QQFloatBallAutoTap)
+- (void)_qqfball_autoTapOnPage;
+@end
+static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
+
 // ── 一键任务主流程：自动导航执行（v1.0.7 升级）──
 //   点一键 → 逐个打开未完成任务页 → 日志实时显示正在做哪个 → 自动检测状态变化
 //   能做自动完成的自动确认；需要手动操作的跳转页面引导用户点一下，然后自动验证

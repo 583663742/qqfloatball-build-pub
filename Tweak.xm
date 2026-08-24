@@ -394,6 +394,27 @@ static NSString *getPskey(NSString *domain, NSString *uin, int keyType) {
     return nil;
 }
 
+// ── 拿 qun.qq.com 域 p_skey（加好友/删好友专用，qsped 抓包里带 * 的特殊 key）──
+//   多 keyType 尝试：qsped 抓包显示 qun 域 p_skey 与 ti 域不同（7AphPTUZBJ*... 带星号）
+static NSString *getQunPskey(NSString *uin) {
+    NSString *fallback = nil;
+    for (NSString *domain in @[@"qun.qq.com", @"web.qun.qq.com", @"qunapp.qq.com"]) {
+        for (int kt = 0; kt <= 3; kt++) {
+            NSString *key = getPskey(domain, uin, kt);
+            if (key && key.length > 0) {
+                // 打码诊断：只露前3后3
+                NSString *mask = key.length > 8 ? [NSString stringWithFormat:@"%@…%@", [key substringToIndex:3], [key substringFromIndex:key.length - 3]] : key;
+                qqlog(@"[pskey] qun域 key: domain=%@ kt=%d len=%lu mask=%@", domain, kt, (unsigned long)key.length, mask);
+                // qsped 抓包 p_skey 带 *，优先带 * 的（星号是 qun 域特有标记）
+                if ([key containsString:@"*"]) return key;
+                if (!fallback) fallback = key;
+            }
+        }
+    }
+    if (fallback) qqlog(@"[pskey] qun域 无带*key，用 fallback");
+    return fallback;
+}
+
 // ── 取当前登录 uin（从 p_skey 管理器遍历已知账号）──
 static NSString *getCurrentUin(void) {
     @try {
@@ -722,20 +743,22 @@ static BOOL runDailySignTask(NSString *uin) {
 static BOOL runAddFriendTask(NSString *uin, NSString *targetUin) {
     qqlog(@"[任务] 加好友 %@…", targetUin ?: @"?");
     if (!targetUin || targetUin.length == 0) { qqlog(@"[任务] 加好友 缺目标号"); return NO; }
-    NSString *pskey = getPskey(@"web.qun.qq.com", uin, 1);
+    NSString *pskey = getQunPskey(uin);
     if (!pskey) pskey = getPskey(@"qun.qq.com", uin, 1);
-    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
-    if (!pskey) { qqlog(@"[任务] 加好友 拿不到 p_skey"); return NO; }
+    if (!pskey) pskey = getPskey(@"web.qun.qq.com", uin, 1);
+    if (!pskey) { qqlog(@"[任务] 加好友 拿不到 qun 域 p_skey"); return NO; }
     int bkn = hash33(pskey);
     NSString *url = [NSString stringWithFormat:@"https://web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_addfriend?bkn=%d", bkn];
-    NSString *cookie = levelCookie(uin, @"web.qun.qq.com");
+    NSString *cookie = [NSString stringWithFormat:@"skey=%@; uin=o%@; p_uin=o%@; p_skey=%@",
+                        (getSkey(uin) ?: @""), uin, uin, pskey];
     NSDictionary *extra = @{
         @"qname-service": @"976321:131072",
         @"qname-space": @"Production",
         @"Origin": @"https://web.qun.qq.com",
         @"Referer": @"https://web.qun.qq.com/",
+        @"User-Agent": @"Mozilla/5.0 (Linux; Android 13; M2105K81AC Build/TKQ1.221013.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/104.0.5112.97 Mobile Safari/537.36 V1_AND_SQ_9.2.0_10970_YYB_D QQ/9.2.0.28325 NetType/WIFI",
     };
-    // body: 先试 form 编码（qsped 抓包 Content-Type: application/x-www-form-urlencoded）
+    // body: qsped 抓包是 form 编码，body 需实测（先用最小 form）
     NSString *body = [NSString stringWithFormat:@"to_uin=%@&from=%@&verify=1", targetUin, uin];
     NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, extra, 15);
     if (!resp) { qqlog(@"[任务] 加好友 无响应"); return NO; }
@@ -747,18 +770,20 @@ static BOOL runAddFriendTask(NSString *uin, NSString *targetUin) {
 static BOOL runRemoveFriendTask(NSString *uin, NSString *targetUin) {
     qqlog(@"[任务] 删好友 %@…", targetUin ?: @"?");
     if (!targetUin || targetUin.length == 0) return NO;
-    NSString *pskey = getPskey(@"web.qun.qq.com", uin, 1);
+    NSString *pskey = getQunPskey(uin);
     if (!pskey) pskey = getPskey(@"qun.qq.com", uin, 1);
-    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
-    if (!pskey) { qqlog(@"[任务] 删好友 拿不到 p_skey"); return NO; }
+    if (!pskey) pskey = getPskey(@"web.qun.qq.com", uin, 1);
+    if (!pskey) { qqlog(@"[任务] 删好友 拿不到 qun 域 p_skey"); return NO; }
     int bkn = hash33(pskey);
     NSString *url = [NSString stringWithFormat:@"https://web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_removefriend?bkn=%d", bkn];
-    NSString *cookie = levelCookie(uin, @"web.qun.qq.com");
+    NSString *cookie = [NSString stringWithFormat:@"skey=%@; uin=o%@; p_uin=o%@; p_skey=%@",
+                        (getSkey(uin) ?: @""), uin, uin, pskey];
     NSDictionary *extra = @{
         @"qname-service": @"976321:131072",
         @"qname-space": @"Production",
         @"Origin": @"https://web.qun.qq.com",
         @"Referer": @"https://web.qun.qq.com/",
+        @"User-Agent": @"Mozilla/5.0 (Linux; Android 13; M2105K81AC Build/TKQ1.221013.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/104.0.5112.97 Mobile Safari/537.36 V1_AND_SQ_9.2.0_10970_YYB_D QQ/9.2.0.28325 NetType/WIFI",
     };
     NSString *body = [NSString stringWithFormat:@"to_uin=%@&from=%@", targetUin, uin];
     NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, extra, 15);

@@ -791,6 +791,108 @@ static void openLevelPage(void) {
     if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
 }
 
+// ══════════════════════════════════════════
+//  Kuikly 等级页 UI 自动化（v1.2.4）
+//  用户原话: 进入等级页 → 自动切「额外活跃」→ 点「展开」→ 任务全出来 → 再获取
+//  等级页是 Kuikly 原生渲染，只能遍历视图层级找文字 + 模拟点击
+// ══════════════════════════════════════════
+
+// ── 递归找含指定文字的视图（UILabel/UIButton/accessibilityLabel）──
+static UIView *findViewWithText(UIView *root, NSString *text) {
+    if (!root || text.length == 0) return nil;
+    @try {
+        NSString *selfText = nil;
+        if ([root isKindOfClass:[UILabel class]]) {
+            selfText = ((UILabel *)root).text;
+        } else if ([root isKindOfClass:[UIButton class]]) {
+            selfText = ((UIButton *)root).currentTitle;
+        } else {
+            selfText = root.accessibilityLabel;
+        }
+        if (selfText && selfText.length > 0 && [selfText containsString:text]) return root;
+        for (UIView *sub in root.subviews) {
+            UIView *found = findViewWithText(sub, text);
+            if (found) return found;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+// ── 模拟点击视图：优先 UIControl sendActions，否则找父链上带 UITapGestureRecognizer 的 view ──
+static BOOL tapView(UIView *v) {
+    if (!v) return NO;
+    @try {
+        UIView *cur = v;
+        while (cur) {
+            if ([cur isKindOfClass:[UIControl class]]) {
+                UIControl *ctl = (UIControl *)cur;
+                [ctl sendActionsForControlEvents:UIControlEventTouchUpInside];
+                return YES;
+            }
+            cur = cur.superview;
+        }
+        // 找父链带 tap 手势的 view，手动触发手势 target/action
+        cur = v;
+        while (cur) {
+            for (UIGestureRecognizer *gr in cur.gestureRecognizers) {
+                if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
+                    // 枚举 target/action 手动触发
+                    id targets = [gr valueForKey:@"_targets"];
+                    if ([targets isKindOfClass:[NSArray class]]) {
+                        for (id t in (NSArray *)targets) {
+                            id target = [t valueForKey:@"_target"];
+                            NSString *action = [t valueForKey:@"_action"];
+                            if (target && action) {
+                                SEL sel = NSSelectorFromString(action);
+                                if ([target respondsToSelector:sel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                    [target performSelector:sel withObject:gr];
+#pragma clang diagnostic pop
+                                    return YES;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cur = cur.superview;
+        }
+    } @catch (NSException *e) {
+        qqlog(@"[UI自动化] tap 异常 %@", e);
+    }
+    return NO;
+}
+
+// ── dump 当前窗口所有含文字的视图（调试：找不到目标时看页面结构）──
+static void dumpTextViews(void) {
+    @try {
+        UIWindow *win = [UIApplication sharedApplication].keyWindow;
+        if (!win) return;
+        NSMutableString *outS = [NSMutableString string];
+        [outS appendString:@"\n═══ 视图文字 dump ═══\n"];
+        __block int count = 0;
+        void (^walk)(UIView *, int) = ^(UIView *view, int depth) {
+            if (count > 60 || depth > 12) return;
+            @try {
+                NSString *txt = nil;
+                if ([view isKindOfClass:[UILabel class]]) txt = ((UILabel *)view).text;
+                else if ([view isKindOfClass:[UIButton class]]) txt = ((UIButton *)view).currentTitle;
+                else txt = view.accessibilityLabel;
+                if (txt && txt.length > 0) {
+                    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+                    [outS appendFormat:@"%@[d%d]%@\n", indent, depth, txt.length > 30 ? [txt substringToIndex:30] : txt];
+                    count++;
+                }
+            } @catch (NSException *e) {}
+            for (UIView *sub in view.subviews) walk(sub, depth + 1);
+        };
+        walk(win, 0);
+        [outS appendString:@"═══ end ═══"];
+        qqlog(@"%@", outS);
+    } @catch (NSException *e) {}
+}
+
 // ── 在任务列表里按标题找任务状态（-1=不存在）──
 static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
     for (NSDictionary *task in taskList) {
@@ -1607,30 +1709,62 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
-    appendLogView(@"🌐 打开等级任务页…");
-    qqlog(@"[action] 打开等级页");
+    appendLogView(@"🌐 自动流程：等级页→额外活跃→展开→获取");
+    qqlog(@"[action] 打开等级页(自动流程 v1.2.4)");
     // 等级页 = Kuikly 原生渲染，用深链打开（task-center 页面自身会跳 Kuikly）
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
     NSString *b64 = [bd base64EncodedStringWithOptions:0];
     NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
     NSURL *u = [NSURL URLWithString:deep];
-    if (u && [[UIApplication sharedApplication] canOpenURL:u]) {
-        [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-        appendLogView(@"已拉起等级页（Kuikly 渲染，等 3 秒进入）");
-        // v1.2.2: 等级页加载时客户端会自己请求 levelTask/Get(带 skey 全凭证)，
-        // 我们 hook 拦截响应存 _capturedTaskList → 2.5 秒后自动刷新面板显示全量
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (_capturedTaskList && _capturedTaskList.count > 0) {
-                appendLogView([NSString stringWithFormat:@"✅ 已从等级页捕获 %lu 个任务", (unsigned long)_capturedTaskList.count]);
-                refreshTaskListUI();
-            } else {
-                appendLogView(@"⏳ 等级页还在加载…再点一次「🔄获取」即可");
-            }
-        });
-    } else {
+    if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
         appendLogView(@"❌ 无法拉起深链，请手动: 头像→等级→额外活跃");
+        return;
     }
+    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+    appendLogView(@"① 已拉起等级页，等 3 秒加载…");
+
+    __block int step = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (step != 1) return; step = 2;
+        appendLogView(@"② 找「额外活跃」分页…");
+        UIView *tab = findViewWithText([UIApplication sharedApplication].keyWindow, @"额外活跃");
+        if (tab) {
+            appendLogView(@"✅ 找到「额外活跃」，点击切换…");
+            qqlog(@"[UI自动化] 点击「额外活跃」 tab");
+            tapView(tab);
+        } else {
+            appendLogView(@"⚠️ 没找到「额外活跃」，dump 视图文字看结构");
+            dumpTextViews();
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (step != 2) return; step = 3;
+            appendLogView(@"③ 找「展开」按钮…");
+            UIView *exp = findViewWithText([UIApplication sharedApplication].keyWindow, @"展开");
+            if (exp) {
+                appendLogView(@"✅ 找到「展开」，点击展开全部任务…");
+                qqlog(@"[UI自动化] 点击「展开」");
+                tapView(exp);
+            } else {
+                appendLogView(@"⚠️ 没找到「展开」，dump 视图文字看结构");
+                dumpTextViews();
+                return;
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (step != 3) return; step = 4;
+                appendLogView(@"④ 任务已展开，自动获取全量任务…");
+                refreshTaskListUI();
+                // 2.5 秒后再查一次捕获结果（客户端请求可能稍晚到）
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (_capturedTaskList && _capturedTaskList.count > 10) {
+                        appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
+                        refreshTaskListUI();
+                    }
+                });
+            });
+        });
+    });
 }
 
 %new

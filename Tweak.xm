@@ -351,8 +351,7 @@ static NSString *zzcSign(NSString *payload) {
         bx[i] = (unsigned char)(byteVal ^ kc[i]);
     }
     NSString *b64 = [[NSData dataWithBytes:bx length:20] base64EncodedStringWithOptions:0];
-    NSCharacterSet *drop = [NSCharacterSet characterSetWithCharactersInString:@"/\\+=\n
-"];
+    NSCharacterSet *drop = [NSCharacterSet characterSetWithCharactersInString:@"/\\+=\n\r"];
     NSString *b64clean = [[b64 componentsSeparatedByCharactersInSet:drop] componentsJoinedByString:@""];
     NSString *result = [NSString stringWithFormat:@"zzc%@%@%@", t1, b64clean, t2];
     return result.lowercaseString;

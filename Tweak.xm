@@ -42,6 +42,9 @@ static NSString *qqlogPath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqflog.txt"];
 }
 
+// 前置声明：qqlog 同时追加到面板日志区（定义在任务面板 UI 部分）
+static void appendLogView(NSString *msg);
+
 static void qqlog(NSString *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -57,6 +60,10 @@ static void qqlog(NSString *fmt, ...) {
         [fh writeData:[[msg stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
         [fh closeFile];
     }
+    // 面板日志区实时同步（主线程刷新 UI）
+    dispatch_async(dispatch_get_main_queue(), ^{
+        appendLogView(msg);
+    });
 }
 
 // ── 异步写日志（不阻塞网络回调线程，防 Kuikly 加载变慢）──
@@ -91,6 +98,7 @@ static BOOL isLevelKeyURL(NSString *url) {
 - (void)_setupFloatBall;
 - (void)_floatBallTapped:(UIButton *)sender;
 - (void)_floatBallPanned:(UIPanGestureRecognizer *)pan;
+- (void)_taskPanelPanned:(UIPanGestureRecognizer *)pan;
 @end
 
 %hook UIApplication
@@ -1134,6 +1142,16 @@ static void showTaskPanel(void) {
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
 
+    // 标题栏拖动条（整个标题栏区域可拖动面板，任务列表滚动不受影响）
+    UIView *dragBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w - 78, 40)];
+    dragBar.backgroundColor = [UIColor clearColor];
+    dragBar.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *panelPan = [[UIPanGestureRecognizer alloc] initWithTarget:[UIApplication sharedApplication]
+                                                                              action:@selector(_taskPanelPanned:)];
+    [dragBar addGestureRecognizer:panelPan];
+    [panel addSubview:dragBar];
+    [panel bringSubviewToFront:dragBar];
+
     // 刷新
     UIButton *refreshBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     refreshBtn.frame = CGRectMake(w - 76, 8, 56, 26);
@@ -1153,14 +1171,14 @@ static void showTaskPanel(void) {
     [panel addSubview:closeBtn];
 
     // 任务列表滚动区
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 40, w, h - 40 - 92)];
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 40, w, h - 40 - 134)];
     scroll.backgroundColor = [UIColor clearColor];
     scroll.showsVerticalScrollIndicator = YES;
     _taskScroll = scroll;
     [panel addSubview:scroll];
 
     // 底部按钮区
-    CGFloat by = h - 86;
+    CGFloat by = h - 128;
     UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     testBtn.frame = CGRectMake(10, by, (w - 30) / 2.0, 34);
     testBtn.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.85];
@@ -1181,8 +1199,8 @@ static void showTaskPanel(void) {
     [execBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskExecCheckedTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:execBtn];
 
-    // 日志区（内嵌，复用 _logTextView）
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, h - 48, w - 12, 42)];
+    // 日志区（内嵌，复用 _logTextView，v1.1.0 加高到 80 显示更全）
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, h - 86, w - 12, 80)];
     tv.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1];
     tv.layer.cornerRadius = 6;
     tv.textColor = [UIColor whiteColor];
@@ -1644,6 +1662,30 @@ __attribute__((unused)) static void dumpPSKeys(void) {
 
         ball.center = CGPointMake(newX, newY);
         [pan setTranslation:CGPointZero inView:ball.superview];
+    }
+}
+
+// ──────────────────────────────────────────
+//  任务面板拖动（手势在标题栏 dragBar 上，拖动 _taskPanel 整体）
+// ──────────────────────────────────────────
+%new
+- (void)_taskPanelPanned:(UIPanGestureRecognizer *)pan {
+    if (!_taskPanel) return;
+    UIView *panel = _taskPanel;
+    CGPoint translation = [pan translationInView:panel.superview];
+    if (pan.state == UIGestureRecognizerStateChanged) {
+        CGPoint newCenter = CGPointMake(panel.center.x + translation.x,
+                                        panel.center.y + translation.y);
+        CGFloat halfW = panel.bounds.size.width / 2.0;
+        CGFloat halfH = panel.bounds.size.height / 2.0;
+        CGFloat minX = halfW;
+        CGFloat maxX = panel.superview.bounds.size.width - halfW;
+        CGFloat minY = halfH;
+        CGFloat maxY = panel.superview.bounds.size.height - halfH;
+        newCenter.x = MAX(minX, MIN(maxX, newCenter.x));
+        newCenter.y = MAX(minY, MIN(maxY, newCenter.y));
+        panel.center = newCenter;
+        [pan setTranslation:CGPointZero inView:panel.superview];
     }
 }
 %end

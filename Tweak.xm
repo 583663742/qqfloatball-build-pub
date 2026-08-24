@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
+#import <CommonCrypto/CommonCrypto.h>
 
 // ── QQ 9.3.35 顶层悬浮窗管理器私有接口（头文件 032238 实锤）──
 //    声明后编译器认识这些 selector（ObjC++ 下向 id 调未声明 selector 会报 error）
@@ -21,8 +22,14 @@ static UIWindow *_floatWindow = nil;
 static UIButton *_floatBall = nil;
 static UIView *_logView = nil;          // 任务日志面板
 static UITextView *_logTextView = nil;  // 日志文本
+static UIView *_taskPanel = nil;        // 任务列表面板（v1.1.0 新 UI）
+static UIScrollView *_taskScroll = nil; // 任务列表滚动区
+static NSArray *_taskListCache = nil;   // 最近一次拉取的任务列表缓存
+static NSMutableSet *_checkedTaskIds = nil; // 勾选的任务 task_id 集合
+static NSString *_friendRobotUin = @"10001"; // 加好友测试机器人号（qsped 模式，待实测确认）
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
+// v1.1.0 起不再有抓包入口（防封防检测），代码保留但默认关
 static BOOL _captureEnabled = NO;
 // ── 仅抓等级关键词（keyTask）时才包装响应；全量模式只记请求不碰响应（防 Kuikly 白屏）──
 static BOOL _captureOnlyTasks = NO;
@@ -305,14 +312,50 @@ static void dumpWebKitCookies(void) {
 //   3. 福利社领券链   → GetBenefitsDetail → ExecAct → GetUserItemsByBenefits
 // ══════════════════════════════════════════
 
-// ── hash33 算法：bkn = hash33(p_skey) ──
+// ── hash33 算法：bkn = hash33(p_skey)（经典版，已在 iOS 实锤可用）──
 static int hash33(NSString *str) {
     if (!str) return 0;
     int e = 0;
-    for (int i = 0; i < str.length; i++) {
+    for (NSUInteger i = 0; i < str.length; i++) {
         e += (e << 5) + [str characterAtIndex:i];
     }
     return 2147483647 & e;
+}
+
+// ── ZZC sign（QQ音乐 musics.fcg 请求签名，qsped_chain.py 同源 16/16 验证）──
+static NSString *zzcSign(NSString *payload) {
+    if (!payload) return @"";
+    // SHA-1
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    NSData *payloadData = [payload dataUsingEncoding:NSUTF8StringEncoding];
+    CC_SHA1(payloadData.bytes, (CC_LONG)payloadData.length, digest);
+    // hex
+    char hex[41];
+    for (int i = 0; i < 20; i++) sprintf(hex + i * 2, "%02x", digest[i]);
+    hex[40] = 0;
+    NSString *s1 = [NSString stringWithUTF8String:hex]; // 40 字符 hex
+    // 索引表（与 qsped_chain.py 一致）
+    int ka[] = {23, 14, 6, 36, 16, 7, 19};
+    int kb[] = {16, 1, 32, 12, 19, 27, 8, 5};
+    int kc[] = {89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179};
+    NSMutableString *t1 = [NSMutableString string];
+    for (int i = 0; i < 7; i++) [t1 appendFormat:@"%C", [s1 characterAtIndex:ka[i]]];
+    NSMutableString *t2 = [NSMutableString string];
+    for (int i = 0; i < 8; i++) [t2 appendFormat:@"%C", [s1 characterAtIndex:kb[i]]];
+    // XOR 20 字节 → base64
+    unsigned char bx[20];
+    for (int i = 0; i < 20; i++) {
+        NSString *pair = [s1 substringWithRange:NSMakeRange(i * 2, 2)];
+        unsigned int byteVal = 0;
+        [[NSScanner scannerWithString:pair] scanHexInt:&byteVal];
+        bx[i] = (unsigned char)(byteVal ^ kc[i]);
+    }
+    NSString *b64 = [[NSData dataWithBytes:bx length:20] base64EncodedStringWithOptions:0];
+    NSCharacterSet *drop = [NSCharacterSet characterSetWithCharactersInString:@"/\\+=\n
+"];
+    NSString *b64clean = [[b64 componentsSeparatedByCharactersInSet:drop] componentsJoinedByString:@""];
+    NSString *result = [NSString stringWithFormat:@"zzc%@%@%@", t1, b64clean, t2];
+    return result.lowercaseString;
 }
 
 // ── 直接调用 QQLoginPSKeyManager 拿指定域 p_skey（keyType=1，现取现用）──
@@ -390,6 +433,57 @@ static NSDictionary *httpPostJSON(NSString *url, NSDictionary *bodyDict, NSStrin
     } @catch (NSException *e) {
         qqlog(@"[http] 异常 %@", e);
     }
+    return nil;
+}
+
+// ── 同步 POST 原始文本（支持任意 body 字符串 + 额外 header），返回完整响应文本 ──
+static NSString *httpPostText(NSString *url, NSString *bodyString, NSString *contentType,
+                              NSString *cookieHeader, NSDictionary *extraHeaders, int timeoutSec) {
+    @try {
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+        req.HTTPMethod = @"POST";
+        [req setValue:(contentType ?: @"application/json") forHTTPHeaderField:@"Content-Type"];
+        if (cookieHeader) [req setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+        [req setValue:@"Mozilla/5.0 (Linux; Android 13; M2105K81AC Build/TKQ1.221013.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/121.0.6167.71 MQQBrowser/6.2 TBS/047903 Mobile Safari/537.36" forHTTPHeaderField:@"User-Agent"];
+        [req setValue:@"https://ti.qq.com/qqlevel/index" forHTTPHeaderField:@"Referer"];
+        for (NSString *k in extraHeaders.allKeys) {
+            NSString *v = extraHeaders[k];
+            if (v) [req setValue:v forHTTPHeaderField:k];
+        }
+        req.HTTPBody = [bodyString dataUsingEncoding:NSUTF8StringEncoding];
+
+        __block NSString *result = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.timeoutIntervalForRequest = timeoutSec;
+        cfg.timeoutIntervalForResource = timeoutSec + 5;
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+        [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if (!err && data) {
+                result = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (!result) result = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+            } else if (err) {
+                result = [NSString stringWithFormat:@"__ERR__%@", err.localizedDescription ?: @""];
+            }
+            dispatch_semaphore_signal(sem);
+        }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (timeoutSec + 10) * NSEC_PER_SEC));
+        [session finishTasksAndInvalidate];
+        return result;
+    } @catch (NSException *e) {
+        qqlog(@"[httpText] 异常 %@", e);
+    }
+    return nil;
+}
+
+// ── 取 skey（QQLoginPSKeyManager keyType=0 通常是 skey 域；失败回退从 cookie 拿）──
+static NSString *getSkey(NSString *uin) {
+    @try {
+        for (NSString *domain in @[@"qq.com", @"", @"web.qun.qq.com"]) {
+            NSString *sk = getPskey(domain, uin, 0);
+            if (sk && sk.length > 0) return sk;
+        }
+    } @catch (NSException *e) {}
     return nil;
 }
 
@@ -578,6 +672,197 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 
+// ══════════════════════════════════════════
+//  qsped 式纯后台任务执行器（v1.1.0）
+//  接口来自 qsped 运行时抓包实锤（D:/android-build/qsped_rerun.log）
+//  全部直接 POST，零页面点击，防封防检测
+// ══════════════════════════════════════════
+
+// ── 组装等级任务通用 Cookie（p_skey 体系 + skey 尝试）──
+static NSString *levelCookie(NSString *uin, NSString *extraPskeyDomain) {
+    NSString *pskey = getPskey(@"ti.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 0);
+    NSString *skey = getSkey(uin);
+    NSString *qunPskey = getPskey(extraPskeyDomain ?: @"ti.qq.com", uin, 1);
+    if (!qunPskey) qunPskey = pskey;
+    NSMutableString *ck = [NSMutableString string];
+    if (skey && skey.length > 0) [ck appendFormat:@"skey=%@; ", skey];
+    [ck appendFormat:@"uin=o%@; p_uin=o%@; p_skey=%@", uin, uin, qunPskey];
+    return ck;
+}
+
+// ── 日签卡打卡（纯后台）─
+//  实测接口: POST ti.qq.com/hybrid-h5/api/json/daily_attendance/SignIn
+//  Cookie: skey/uin/p_uin/p_skey
+static BOOL runDailySignTask(NSString *uin) {
+    qqlog(@"[任务] 日签卡打卡…");
+    NSString *cookie = levelCookie(uin, @"ti.qq.com");
+    // body 先试空对象，如失败再根据响应调整
+    NSString *resp = httpPostText(@"https://ti.qq.com/hybrid-h5/api/json/daily_attendance/SignIn",
+                                  @"{}", @"application/json", cookie, nil, 15);
+    if (!resp) { qqlog(@"[任务] 日签卡 无响应"); return NO; }
+    qqlog(@"[任务] 日签卡 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    if ([resp containsString:@"__ERR__"]) { qqlog(@"[任务] 日签卡 网络错误"); return NO; }
+    // 响应含 errCode/ret：0 或成功标志
+    return !([resp containsString:@"\"ret\":-"] || [resp containsString:@"\"code\":-"] || [resp containsString:@"\"errCode\":-"]);
+}
+
+// ── 加好友（纯后台，qsped 实锤接口）──
+//  实测接口: POST web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_addfriend?bkn=
+//  headers: qname-service: 976321:131072, qname-space: Production
+//  机器人号: qsped 抓包里加的是机器人（robots），body 需测试确认
+static BOOL runAddFriendTask(NSString *uin, NSString *targetUin) {
+    qqlog(@"[任务] 加好友 %@…", targetUin ?: @"?");
+    if (!targetUin || targetUin.length == 0) { qqlog(@"[任务] 加好友 缺目标号"); return NO; }
+    NSString *pskey = getPskey(@"web.qun.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"qun.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
+    if (!pskey) { qqlog(@"[任务] 加好友 拿不到 p_skey"); return NO; }
+    int bkn = hash33(pskey);
+    NSString *url = [NSString stringWithFormat:@"https://web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_addfriend?bkn=%d", bkn];
+    NSString *cookie = levelCookie(uin, @"web.qun.qq.com");
+    NSDictionary *extra = @{
+        @"qname-service": @"976321:131072",
+        @"qname-space": @"Production",
+        @"Origin": @"https://web.qun.qq.com",
+        @"Referer": @"https://web.qun.qq.com/",
+    };
+    // body: 先试 form 编码（qsped 抓包 Content-Type: application/x-www-form-urlencoded）
+    NSString *body = [NSString stringWithFormat:@"to_uin=%@&from=%@&verify=1", targetUin, uin];
+    NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, extra, 15);
+    if (!resp) { qqlog(@"[任务] 加好友 无响应"); return NO; }
+    qqlog(@"[任务] 加好友 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    return YES; // 结果判断等真实响应后定
+}
+
+// ── 删好友（纯后台，测试模式收尾用）──
+static BOOL runRemoveFriendTask(NSString *uin, NSString *targetUin) {
+    qqlog(@"[任务] 删好友 %@…", targetUin ?: @"?");
+    if (!targetUin || targetUin.length == 0) return NO;
+    NSString *pskey = getPskey(@"web.qun.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"qun.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
+    if (!pskey) { qqlog(@"[任务] 删好友 拿不到 p_skey"); return NO; }
+    int bkn = hash33(pskey);
+    NSString *url = [NSString stringWithFormat:@"https://web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_removefriend?bkn=%d", bkn];
+    NSString *cookie = levelCookie(uin, @"web.qun.qq.com");
+    NSDictionary *extra = @{
+        @"qname-service": @"976321:131072",
+        @"qname-space": @"Production",
+        @"Origin": @"https://web.qun.qq.com",
+        @"Referer": @"https://web.qun.qq.com/",
+    };
+    NSString *body = [NSString stringWithFormat:@"to_uin=%@&from=%@", targetUin, uin];
+    NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, extra, 15);
+    if (!resp) { qqlog(@"[任务] 删好友 无响应"); return NO; }
+    qqlog(@"[任务] 删好友 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    return YES;
+}
+
+// ── 金币兑换等级加速（QQ音乐 musics.fcg，ZZC sign 已复刻）──
+//  注意: 需要 qm_keyst cookie（QQ音乐域），iOS QQ 内可能没有，先探测
+static BOOL runCoinExchangeTask(NSString *uin) {
+    qqlog(@"[任务] 金币兑换加速…");
+    // 探测 qm_keyst
+    NSString *qmKey = nil;
+    @try {
+        Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
+        id mgr = mgrCls ? ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance")) : nil;
+        if (mgr) {
+            for (NSString *dom in @[@"y.qq.com", @"u6.y.qq.com", @"i2.y.qq.com"]) {
+                for (int kt = 0; kt <= 2; kt++) {
+                    NSString *k = getPskey(dom, uin, kt);
+                    if (k && k.length > 0) { qmKey = k; break; }
+                }
+                if (qmKey) break;
+            }
+        }
+    } @catch (NSException *e) {}
+    if (!qmKey) {
+        qqlog(@"[任务] 金币兑换 无 qm_keyst（QQ音乐登录态不在本机，需小号抓包或跳过）");
+        return NO;
+    }
+    qqlog(@"[任务] 金币兑换 找到 qm_keyst，走 musics.fcg…");
+    // 兑换 body: 与 qsped_bot.py exchange 一致
+    NSString *bodyStr = @"{\"comm\":{\"uin\":%lld,\"format\":\"json\",\"inCharset\":\"utf-8\",\"outCharset\":\"utf-8\",\"notice\":0,\"platform\":\"h5\",\"needNewCode\":1,\"ct\":23,\"cv\":0},\"req_0\":{\"module\":\"music.pointcgi.ExchangeCgi\",\"method\":\"QQAccelerateTaskFulfillment\",\"param\":{\"taskID\":1084}}}";
+    bodyStr = [NSString stringWithFormat:bodyStr, [uin longLongValue]];
+    // ZZC sign 算法（C 实现，qsped_chain.py 同源）
+    NSString *sign = zzcSign(bodyStr);
+    NSString *url = [NSString stringWithFormat:@"https://u6.y.qq.com/cgi-bin/musics.fcg?sign=%@", sign];
+    NSString *cookie = [NSString stringWithFormat:@"uin=o%@; qm_keyst=%@", uin, qmKey];
+    NSDictionary *extra = @{@"Origin": @"https://y.qq.com", @"Referer": @"https://y.qq.com/"};
+    NSString *resp = httpPostText(url, bodyStr, @"application/json", cookie, extra, 15);
+    if (!resp) { qqlog(@"[任务] 金币兑换 无响应"); return NO; }
+    qqlog(@"[任务] 金币兑换 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    return YES;
+}
+
+// ── 发空间说说（纯后台，qsped 实锤接口）──
+static BOOL runShuoshuoTask(NSString *uin, NSString *content) {
+    qqlog(@"[任务] 发布空间说说…");
+    NSString *pskey = getPskey(@"qzone.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"user.qzone.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
+    if (!pskey) { qqlog(@"[任务] 发说说 拿不到 p_skey"); return NO; }
+    int gtk = hash33(pskey);
+    NSString *url = [NSString stringWithFormat:@"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6?g_tk=%d", gtk];
+    NSString *cookie = [NSString stringWithFormat:@"p_uin=o%@; p_skey=%@; uin=o%@", uin, pskey, uin];
+    NSString *text = content ?: @"等级任务打卡";
+    // body 格式: qzone publish_v6 标准 form（con=内容&format=json&...）
+    NSString *body = [NSString stringWithFormat:@"con=%@&feedversion=1&ver=1&ugc_right=1&format=json&richtype=1&richtext=&private=0&to_sign=0&uin=%@&rd=0", text, uin];
+    NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, nil, 15);
+    if (!resp) { qqlog(@"[任务] 发说说 无响应"); return NO; }
+    qqlog(@"[任务] 发说说 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    return YES;
+}
+
+// ── 空间点赞（纯后台）──
+static BOOL runLikeTask(NSString *uin, NSString *targetUin) {
+    qqlog(@"[任务] 空间点赞…");
+    NSString *pskey = getPskey(@"qzone.qq.com", uin, 1);
+    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
+    if (!pskey) { qqlog(@"[任务] 点赞 拿不到 p_skey"); return NO; }
+    int gtk = hash33(pskey);
+    NSString *url = [NSString stringWithFormat:@"https://h5.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app?g_tk=%d", gtk];
+    NSString *cookie = levelCookie(uin, @"qzone.qq.com");
+    NSString *body = [NSString stringWithFormat:@"to_uin=%@&uin=%@&format=json", targetUin ?: uin, uin];
+    NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, nil, 15);
+    if (!resp) { qqlog(@"[任务] 点赞 无响应"); return NO; }
+    qqlog(@"[任务] 点赞 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    return YES;
+}
+
+// ── 测试模式：加好友 → 验证 → 删好友（用户定案 v1.1.0）──
+static void runTestFriendTask(NSString *uin, NSString *targetUin) {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        qqlog(@"[测试] ══ 加好友→删好友 测试开始 ══");
+        BOOL addOK = runAddFriendTask(uin, targetUin);
+        qqlog(@"[测试] 加好友结果: %@", addOK ? @"已发请求" : @"失败");
+        [NSThread sleepForTimeInterval:3];
+        BOOL rmOK = runRemoveFriendTask(uin, targetUin);
+        qqlog(@"[测试] 删好友结果: %@", rmOK ? @"已发请求" : @"失败");
+        qqlog(@"[测试] ══ 测试结束（日志见上，响应已记录）══");
+    });
+}
+
+// ── 按任务标题分派执行（点「做」按钮走这里）──
+static void execTaskByTitle(NSString *title, NSString *uin) {
+    if (!title) return;
+    if ([title containsString:@"日签卡"]) {
+        runDailySignTask(uin);
+    } else if ([title containsString:@"加一位好友"] || [title containsString:@"加好友"]) {
+        runAddFriendTask(uin, @"10001"); // 机器人号待定，测试时日志确认
+    } else if ([title containsString:@"金币兑换"] || [title containsString:@"金币"]) {
+        runCoinExchangeTask(uin);
+    } else if ([title containsString:@"说说"] || [title containsString:@"空间"]) {
+        runShuoshuoTask(uin, nil);
+    } else if ([title containsString:@"点赞"] || [title containsString:@"好友动态"]) {
+        runLikeTask(uin, nil);
+    } else {
+        qqlog(@"[任务] %@ 无纯后台接口，跳转页面…", title);
+    }
+}
+
 // ── 一键任务主流程：自动导航执行（v1.0.7 升级）──
 //   点一键 → 逐个打开未完成任务页 → 日志实时显示正在做哪个 → 自动检测状态变化
 //   能做自动完成的自动确认；需要手动操作的跳转页面引导用户点一下，然后自动验证
@@ -697,6 +982,224 @@ static void runAutoTasks(void) {
 }
 
 // ══════════════════════════════════════════
+//  任务列表面板 UI（v1.1.0 新 UI，替代系统弹窗）
+//  勾选任务 → 执行勾选；测试模式 → 加好友→删好友
+// ══════════════════════════════════════════
+
+// ── 任务状态文案 ──
+static NSString *taskStatusText(NSDictionary *task) {
+    NSNumber *s = task[@"status"];
+    int st = s ? [s intValue] : -1;
+    if (st >= 1) return @"✅已完成";
+    if (st == 0) return @"▶可做";
+    return @"❓未知";
+}
+
+// ── 加速天数文案（accelerate_days 字段）──
+static NSString *taskDaysText(NSDictionary *task) {
+    id days = task[@"accelerate_days"];
+    if (days) {
+        double d = [days doubleValue];
+        return [NSString stringWithFormat:@"+%.1f天", d];
+    }
+    NSString *title = task[@"title"] ?: @"";
+    NSRange r = [title rangeOfString:@"\\+[0-9.]+天" options:NSRegularExpressionSearch];
+    if (r.location != NSNotFound) {
+        return [title substringWithRange:r];
+    }
+    return @"";
+}
+
+// ── 渲染任务列表（先清空再重建）──
+static void renderTaskRows(void) {
+    if (!_taskScroll) return;
+    for (UIView *sub in _taskScroll.subviews) [sub removeFromSuperview];
+    NSArray *list = _taskListCache;
+    if (!list || list.count == 0) {
+        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(10, 10, _taskScroll.bounds.size.width - 20, 40)];
+        empty.text = @"任务列表为空，点「刷新」重试";
+        empty.textColor = [UIColor whiteColor];
+        empty.font = [UIFont systemFontOfSize:12];
+        empty.numberOfLines = 0;
+        [_taskScroll addSubview:empty];
+        return;
+    }
+    CGFloat y = 6;
+    CGFloat rowH = 46;
+    CGFloat w = _taskScroll.bounds.size.width;
+    for (int i = 0; i < (int)list.count; i++) {
+        NSDictionary *task = list[i];
+        if (![task isKindOfClass:[NSDictionary class]]) continue;
+        NSString *title = task[@"title"] ?: task[@"task_name"] ?: @"?";
+        NSString *tid = task[@"task_id"] ?: @"";
+        NSString *days = taskDaysText(task);
+        NSString *status = taskStatusText(task);
+        NSString *btnText = task[@"button_text"] ?: @"";
+
+        UIView *row = [[UIView alloc] initWithFrame:CGRectMake(6, y, w - 12, rowH)];
+        row.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+        row.layer.cornerRadius = 8;
+        row.userInteractionEnabled = YES;
+
+        // 勾选框
+        UIButton *chk = [UIButton buttonWithType:UIButtonTypeCustom];
+        chk.frame = CGRectMake(8, (rowH - 28) / 2.0, 28, 28);
+        chk.tag = i;
+        BOOL checked = _checkedTaskIds && [tid length] > 0 && [_checkedTaskIds containsObject:tid];
+        [chk setTitle:checked ? @"☑" : @"☐" forState:UIControlStateNormal];
+        [chk setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        chk.titleLabel.font = [UIFont systemFontOfSize:18];
+        [chk addTarget:[UIApplication sharedApplication] action:@selector(_taskCheckTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [row addSubview:chk];
+
+        // 标题（可两行）
+        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(42, 4, w - 12 - 42 - 80, 26)];
+        tl.text = title;
+        tl.textColor = [UIColor whiteColor];
+        tl.font = [UIFont systemFontOfSize:12];
+        tl.numberOfLines = 1;
+        tl.lineBreakMode = NSLineBreakByTruncatingTail;
+        [row addSubview:tl];
+
+        // 加速天数
+        UILabel *dl = [[UILabel alloc] initWithFrame:CGRectMake(w - 12 - 8 - 74, 4, 74, 18)];
+        dl.text = days;
+        dl.textColor = [UIColor systemYellowColor];
+        dl.font = [UIFont systemFontOfSize:11];
+        dl.textAlignment = NSTextAlignmentRight;
+        [row addSubview:dl];
+
+        // 状态
+        UILabel *sl = [[UILabel alloc] initWithFrame:CGRectMake(w - 12 - 8 - 74, 24, 74, 16)];
+        sl.text = status;
+        sl.textColor = [UIColor systemGreenColor];
+        sl.font = [UIFont systemFontOfSize:10];
+        sl.textAlignment = NSTextAlignmentRight;
+        [row addSubview:sl];
+
+        [_taskScroll addSubview:row];
+        y += rowH + 4;
+    }
+    _taskScroll.contentSize = CGSizeMake(w, y + 10);
+}
+
+// ── 刷新任务列表（拉接口 → 渲染）──
+static void refreshTaskListUI(void) {
+    appendLogView(@"🔄 拉取任务列表…");
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *uin = getCurrentUin();
+        NSString *tiPskey = getPskey(@"ti.qq.com", uin, 1);
+        if (!tiPskey) tiPskey = getPskey(@"ti.qq.com", uin, 0);
+        int retCode = 0;
+        NSArray *list = nil;
+        if (tiPskey) list = fetchTaskList(uin, tiPskey, &retCode);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (list && list.count > 0) {
+                _taskListCache = list;
+                if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
+                appendLogView([NSString stringWithFormat:@"✅ 拉取 %lu 个任务", (unsigned long)list.count]);
+            } else {
+                appendLogView([NSString stringWithFormat:@"❌ 任务列表为空 (ret=%d, pskey=%@)", retCode, tiPskey ? @"有" : @"无"]);
+            }
+            renderTaskRows();
+        });
+    });
+}
+
+// ── 显示任务面板 ──
+static void showTaskPanel(void) {
+    if (_taskPanel) { // 已开则收起
+        [_taskPanel removeFromSuperview];
+        _taskPanel = nil;
+        _logView = nil;
+        _logTextView = nil;
+        _taskScroll = nil;
+        return;
+    }
+    if (!_floatWindow) return;
+    CGRect frame = _floatWindow.bounds;
+    CGFloat w = MIN(330, frame.size.width - 16);
+    CGFloat h = MIN(480, frame.size.height - 60);
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(frame.size.width - w - 8, 8, w, h)];
+    panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+    panel.layer.cornerRadius = 14;
+    panel.layer.masksToBounds = YES;
+    panel.userInteractionEnabled = YES;
+    _taskPanel = panel;
+
+    // 标题栏
+    UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
+    titleLb.text = @"⚡ QQ等级任务";
+    titleLb.textColor = [UIColor whiteColor];
+    titleLb.font = [UIFont boldSystemFontOfSize:15];
+    [panel addSubview:titleLb];
+
+    // 刷新
+    UIButton *refreshBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    refreshBtn.frame = CGRectMake(w - 76, 8, 56, 26);
+    [refreshBtn setTitle:@"🔄刷新" forState:UIControlStateNormal];
+    [refreshBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    refreshBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    [refreshBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:refreshBtn];
+
+    // 关闭
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    closeBtn.frame = CGRectMake(w - 30, 8, 24, 26);
+    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont systemFontOfSize:14];
+    [closeBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:closeBtn];
+
+    // 任务列表滚动区
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 40, w, h - 40 - 92)];
+    scroll.backgroundColor = [UIColor clearColor];
+    scroll.showsVerticalScrollIndicator = YES;
+    _taskScroll = scroll;
+    [panel addSubview:scroll];
+
+    // 底部按钮区
+    CGFloat by = h - 86;
+    UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    testBtn.frame = CGRectMake(10, by, (w - 30) / 2.0, 34);
+    testBtn.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.85];
+    testBtn.layer.cornerRadius = 8;
+    [testBtn setTitle:@"🧪 测试加好友" forState:UIControlStateNormal];
+    [testBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    testBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    [testBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskTestFriendTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:testBtn];
+
+    UIButton *execBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    execBtn.frame = CGRectMake(20 + (w - 30) / 2.0, by, (w - 30) / 2.0, 34);
+    execBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
+    execBtn.layer.cornerRadius = 8;
+    [execBtn setTitle:@"▶ 执行勾选" forState:UIControlStateNormal];
+    [execBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    execBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    [execBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskExecCheckedTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:execBtn];
+
+    // 日志区（内嵌，复用 _logTextView）
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, h - 48, w - 12, 42)];
+    tv.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1];
+    tv.layer.cornerRadius = 6;
+    tv.textColor = [UIColor whiteColor];
+    tv.font = [UIFont systemFontOfSize:10];
+    tv.editable = NO;
+    tv.selectable = NO;
+    tv.text = @"日志：\n";
+    _logTextView = tv;
+    _logView = panel;
+    [panel addSubview:tv];
+
+    [_floatWindow addSubview:panel];
+    // 首次打开自动拉列表
+    refreshTaskListUI();
+}
+
+// ══════════════════════════════════════════
 //  任务日志面板 UI（悬浮窗内嵌，不干扰 QQ）
 // ══════════════════════════════════════════
 static void appendLogView(NSString *msg) {
@@ -750,6 +1253,11 @@ static void showLogPanel(void) {
 // 提前声明
 @interface UIApplication (QQFloatBallLog)
 - (void)_closeLogPanel:(UIButton *)sender;
+- (void)_taskCheckTapped:(UIButton *)sender;
+- (void)_taskRefreshTapped:(UIButton *)sender;
+- (void)_taskCloseTapped:(UIButton *)sender;
+- (void)_taskTestFriendTapped:(UIButton *)sender;
+- (void)_taskExecCheckedTapped:(UIButton *)sender;
 @end
 
 %hook UIApplication
@@ -759,7 +1267,75 @@ static void showLogPanel(void) {
         [_logView removeFromSuperview];
         _logView = nil;
         _logTextView = nil;
+        _taskScroll = nil;
+        _taskPanel = nil;
     }
+}
+%end
+
+// ── 任务面板按钮处理（v1.1.0）──
+%hook UIApplication
+%new
+- (void)_taskCheckTapped:(UIButton *)sender {
+    int idx = (int)sender.tag;
+    if (!_taskListCache || idx < 0 || idx >= (int)_taskListCache.count) return;
+    NSDictionary *task = _taskListCache[idx];
+    NSString *tid = task[@"task_id"] ?: @"";
+    if (tid.length == 0) return;
+    if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
+    if ([_checkedTaskIds containsObject:tid]) {
+        [_checkedTaskIds removeObject:tid];
+    } else {
+        [_checkedTaskIds addObject:tid];
+    }
+    renderTaskRows();
+    appendLogView([NSString stringWithFormat:@"☑ 勾选: %@", task[@"title"] ?: tid]);
+}
+
+%new
+- (void)_taskRefreshTapped:(UIButton *)sender {
+    refreshTaskListUI();
+}
+
+%new
+- (void)_taskCloseTapped:(UIButton *)sender {
+    if (_taskPanel) {
+        [_taskPanel removeFromSuperview];
+        _taskPanel = nil;
+        _logView = nil;
+        _logTextView = nil;
+        _taskScroll = nil;
+    }
+}
+
+%new
+- (void)_taskTestFriendTapped:(UIButton *)sender {
+    qqlog(@"[action] 测试加好友 → 删好友");
+    appendLogView(@"🧪 测试开始：加好友→删好友…");
+    NSString *uin = getCurrentUin();
+    runTestFriendTask(uin, _friendRobotUin);
+}
+
+%new
+- (void)_taskExecCheckedTapped:(UIButton *)sender {
+    if (!_checkedTaskIds || _checkedTaskIds.count == 0) {
+        appendLogView(@"⚠️ 先勾选任务再执行");
+        return;
+    }
+    NSString *uin = getCurrentUin();
+    appendLogView([NSString stringWithFormat:@"▶ 开始执行 %lu 个勾选任务…", (unsigned long)_checkedTaskIds.count]);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        for (NSDictionary *task in _taskListCache) {
+            if (![task isKindOfClass:[NSDictionary class]]) continue;
+            NSString *tid = task[@"task_id"] ?: @"";
+            if (!tid || ![_checkedTaskIds containsObject:tid]) continue;
+            NSString *title = task[@"title"] ?: @"?";
+            qqlog(@"[任务] ── 执行: %@ ──", title);
+            execTaskByTitle(title, uin);
+            [NSThread sleepForTimeInterval:2];
+        }
+        appendLogView(@"✅ 勾选任务执行完毕（详见日志）");
+    });
 }
 %end
 
@@ -1035,109 +1611,12 @@ static void dumpPSKeys(void) {
 }
 
 // ──────────────────────────────────────────
-//  点击弹窗（抓包 / 一键做任务 / 任务日志）
+//  点击球 → 打开/收起任务列表面板（v1.1.0，不再弹系统弹窗）
 // ──────────────────────────────────────────
 %new
 - (void)_floatBallTapped:(UIButton *)sender {
-    NSString *status = _captureEnabled ? @"● 抓包中" : @"○ 未抓包";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"悬浮球"
-                                                                   message:[NSString stringWithFormat:@"当前状态：%@\n开始后记录网络请求，点球随时停止", status]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    NSString *actionTitle = _captureEnabled ? @"停止抓包" : @"开始抓包";
-    [alert addAction:[UIAlertAction actionWithTitle:actionTitle
-                                              style:_captureEnabled ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        _captureEnabled = !_captureEnabled;
-        qqlog(@"[action] 抓包%@", _captureEnabled ? @"开始" : @"停止");
-        if (_captureEnabled) {
-            dumpObjCClasses();
-            dumpWebKitCookies();
-            dumpPSKeys();
-        }
-    }]];
-    // 一键任务：检测界面 + 检查任务状态（2026-08-19 用户定案：不做自动执行，先检查汇报）
-    [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 一键任务"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        qqlog(@"[action] 一键任务启动");
-        [self _closeLogPanel:nil];
-        showLogPanel();
-        appendLogView(@"⚡ 一键任务：检测界面+检查任务…");
-        runAutoTasks();
-        // 日志面板轮询刷新（从任务启动时的文件偏移读起）
-        NSInteger startOffset = [[[NSFileManager defaultManager] attributesOfItemAtPath:qqlogPath() error:nil][NSFileSize] longValue] ?: 0;
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-            NSInteger lastOffset = startOffset;
-            for (int i = 0; i < 240 && _taskRunning; i++) {
-                @try {
-                    NSData *data = [NSData dataWithContentsOfFile:qqlogPath()];
-                    if (data && data.length > lastOffset) {
-                        NSString *tail = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                        NSString *newPart = [tail substringFromIndex:MIN(lastOffset, tail.length)];
-                        NSArray *lines = [newPart componentsSeparatedByString:@"\n"];
-                        for (NSString *ln in lines) {
-                            NSString *trimmed = [ln stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                            if (trimmed.length > 0 && [trimmed containsString:@"["]) {
-                                appendLogView(trimmed);
-                            }
-                        }
-                        lastOffset = data.length;
-                    }
-                } @catch (NSException *e) {}
-                [NSThread sleepForTimeInterval:0.5];
-            }
-            if (_taskRunning) {
-                appendLogView(@"⏳ 检查仍在进行（可稍后再点一次）");
-            } else {
-                appendLogView(@"✅ 任务检查完毕");
-            }
-        });
-    }]];
-    // 打开等级页（Kuikly 原生）
-    [alert addAction:[UIAlertAction actionWithTitle:@"📖 打开等级页"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        qqlog(@"[action] 打开等级页");
-        // 用 QQ 深链打开等级页（走 Kuikly 原生渲染）
-        NSURL *url = [NSURL URLWithString:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=aHR0cHM6Ly90aS5xcS5jb20vcXFsZXZlbC9pbmRleD92ZXJzaW9uPTEmdGFiPTYmc291cmNlPTE1"];
-        if (url) {
-            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"📋 任务日志"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        if (_logView) {
-            [self _closeLogPanel:nil];
-        } else {
-            showLogPanel();
-            appendLogView(@"任务日志面板已打开");
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-
-    // 优先从悬浮窗自己的 rootViewController 弹出（不干扰 QQ 页面）
-    UIViewController *presenter = _floatWindow.rootViewController;
-    if (presenter && !presenter.presentedViewController) {
-        [presenter presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-
-    // 兜底：取活跃 scene 的 rootVC
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            if (ws.activationState == UISceneActivationStateForegroundActive) {
-                UIViewController *rootVC = ws.windows.firstObject.rootViewController;
-                if (rootVC) {
-                    [rootVC presentViewController:alert animated:YES completion:nil];
-                    return;
-                }
-            }
-        }
-    }
+    qqlog(@"[action] 点球 → 任务面板");
+    showTaskPanel();
 }
 
 // ──────────────────────────────────────────

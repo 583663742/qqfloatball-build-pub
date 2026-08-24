@@ -1139,6 +1139,16 @@ static void refreshTaskListUI(void) {
     });
 }
 
+// ── 顶部安全区高度(灵动岛/刘海) ──
+static CGFloat safeTopInset(void) {
+    CGFloat topInset = 20;
+    UIWindow *mainWin = [UIApplication sharedApplication].keyWindow;
+    if (@available(iOS 11.0, *)) {
+        if (mainWin && mainWin.safeAreaInsets.top > 0) topInset = mainWin.safeAreaInsets.top;
+    }
+    return topInset;
+}
+
 // ── 显示任务面板 ──
 static void showTaskPanel(void) {
     if (_taskPanel) { // 已开则收起
@@ -1152,8 +1162,10 @@ static void showTaskPanel(void) {
     if (!_floatWindow) return;
     CGRect frame = _floatWindow.bounds;
     CGFloat w = MIN(330, frame.size.width - 16);
-    CGFloat h = MIN(480, frame.size.height - 60);
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(frame.size.width - w - 8, 8, w, h)];
+    // v1.1.4: 面板默认显示在安全区下方, 不压灵动岛(否则顶部拖拽区收不到触摸)
+    CGFloat y = safeTopInset() + 70;
+    CGFloat h = MIN(480, frame.size.height - y - 40);
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(frame.size.width - w - 8, y, w, h)];
     panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
     panel.layer.cornerRadius = 14;
     panel.layer.masksToBounds = YES;
@@ -1705,7 +1717,8 @@ __attribute__((unused)) static void dumpPSKeys(void) {
         CGFloat halfH = panel.bounds.size.height / 2.0;
         CGFloat minX = halfW;
         CGFloat maxX = panel.superview.bounds.size.width - halfW;
-        CGFloat minY = halfH;
+        // v1.1.4: 面板顶部不允许拖进灵动岛/状态栏区域(否则拖拽区收不到触摸)
+        CGFloat minY = safeTopInset() + 20 + halfH;
         CGFloat maxY = panel.superview.bounds.size.height - halfH;
         newCenter.x = MAX(minX, MIN(maxX, newCenter.x));
         newCenter.y = MAX(minY, MIN(maxY, newCenter.y));

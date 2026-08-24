@@ -870,7 +870,8 @@ static BOOL tapView(UIView *v) {
                             Ivar aIvar = class_getInstanceVariable([t class], "_action");
                             if (!tIvar || !aIvar) continue;
                             id target = object_getIvar(t, tIvar);
-                            SEL action = (SEL)object_getIvar(t, aIvar);
+                            // _action 是 SEL(ivar 裸指针), ARC 下禁止 id→SEL 隐式cast, 用 uintptr_t 中转
+                            SEL action = (SEL)(uintptr_t)object_getIvar(t, aIvar);
                             if (target && action) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"

@@ -280,7 +280,7 @@ static BOOL isLevelKeyURL(NSString *url) {
 }
 
 %end
-static void dumpWebKitCookies(void) {
+__attribute__((unused)) static void dumpWebKitCookies(void) {
     @try {
         Class wdsClass = NSClassFromString(@"WKWebsiteDataStore");
         if (!wdsClass) { qqlog(@"[wkCookie] WKWebsiteDataStore 不存在"); return; }
@@ -866,7 +866,7 @@ static void execTaskByTitle(NSString *title, NSString *uin) {
 // ── 一键任务主流程：自动导航执行（v1.0.7 升级）──
 //   点一键 → 逐个打开未完成任务页 → 日志实时显示正在做哪个 → 自动检测状态变化
 //   能做自动完成的自动确认；需要手动操作的跳转页面引导用户点一下，然后自动验证
-static void runAutoTasks(void) {
+__attribute__((unused)) static void runAutoTasks(void) {
     if (_taskRunning) {
         qqlog(@"[auto] 任务执行已在运行中");
         return;
@@ -1217,7 +1217,7 @@ static void appendLogView(NSString *msg) {
     });
 }
 
-static void showLogPanel(void) {
+__attribute__((unused)) static void showLogPanel(void) {
     if (_logView || !_floatWindow) return;
     CGRect frame = _floatWindow.bounds;
     CGFloat w = MIN(300, frame.size.width - 20);
@@ -1435,7 +1435,7 @@ static void autoTapAllWebViews(void) {
 }
 
 // ── 枚举 ObjC 类（找网络桥接类，只读安全）──
-static void dumpObjCClasses(void) {
+__attribute__((unused)) static void dumpObjCClasses(void) {
     @try {
         int total = objc_getClassList(NULL, 0);
         Class *classes = (Class *)malloc(sizeof(Class) * total);
@@ -1465,7 +1465,7 @@ static void dumpObjCClasses(void) {
 }
 
 // ── 直接调用 QQLoginPSKeyManager 拿 p_skey（免登录核心）──
-static void dumpPSKeys(void) {
+__attribute__((unused)) static void dumpPSKeys(void) {
     Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
     if (!mgrCls) { qqlog(@"[pskey] QQLoginPSKeyManager 不存在"); return; }
     id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance"));

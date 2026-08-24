@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
 
 // ── QQ 9.3.35 顶层悬浮窗管理器私有接口（头文件 032238 实锤）──
@@ -861,20 +862,21 @@ static BOOL tapView(UIView *v) {
             for (UIGestureRecognizer *gr in cur.gestureRecognizers) {
                 if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
                     // 枚举 target/action 手动触发
+                    // 注意: _target/_action 是 ivar, _action 是 SEL(非对象), 必须用 runtime 读, 不能 KVC
                     id targets = [gr valueForKey:@"_targets"];
                     if ([targets isKindOfClass:[NSArray class]]) {
                         for (id t in (NSArray *)targets) {
-                            id target = [t valueForKey:@"_target"];
-                            NSString *action = [t valueForKey:@"_action"];
+                            Ivar tIvar = class_getInstanceVariable([t class], "_target");
+                            Ivar aIvar = class_getInstanceVariable([t class], "_action");
+                            if (!tIvar || !aIvar) continue;
+                            id target = object_getIvar(t, tIvar);
+                            SEL action = (SEL)object_getIvar(t, aIvar);
                             if (target && action) {
-                                SEL sel = NSSelectorFromString(action);
-                                if ([target respondsToSelector:sel]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                    [target performSelector:sel withObject:gr];
+                                [target performSelector:action withObject:gr];
 #pragma clang diagnostic pop
-                                    return YES;
-                                }
+                                return YES;
                             }
                         }
                     }

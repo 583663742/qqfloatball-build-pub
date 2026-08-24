@@ -671,6 +671,7 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 // ── 提前声明：runAutoTasks 里调用（定义在其后）──
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
+static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 
 // ══════════════════════════════════════════
 //  qsped 式纯后台任务执行器（v1.1.0）

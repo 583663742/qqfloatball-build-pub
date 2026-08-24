@@ -28,6 +28,13 @@ static NSArray *_taskListCache = nil;   // 最近一次拉取的任务列表缓�
 static NSMutableSet *_checkedTaskIds = nil; // 勾选的任务 task_id 集合
 static NSString *_friendRobotUin = @"10001"; // 加好友测试机器人号（qsped 模式，待实测确认）
 
+// ── 客户端原生请求捕获的全量任务列表（v1.2.2：hook QQ 自己发的 levelTask/Get 响应）──
+//   QQ 客户端带 skey 全凭证请求，服务端返回全量任务；我们拦截响应存这里，供面板展示
+static NSArray *_capturedTaskList = nil;
+static BOOL _capturedListDirty = NO;
+// ── 客户端原生请求捕获的 qun 域真实 p_skey（v1.2.2 修复加好友 csrf error）──
+static NSString *_capturedQunPskey = nil;
+
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 // v1.1.0 起不再有抓包入口（防封防检测），代码保留但默认关
 static BOOL _captureEnabled = NO;
@@ -165,8 +172,44 @@ static BOOL isLevelKeyURL(NSString *url) {
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     @try {
+        NSString *url = request.URL.absoluteString ?: @"";
+        BOOL isLevelGet = [url containsString:@"levelTask/Get"];
+        // v1.2.2: 无论抓包开关，只要 URL 是 levelTask/Get 就拦截响应存全量任务列表
+        //（QQ 客户端自己带 skey 全凭证请求，服务端返回的就是完整任务；我们只读不改）
+        if (isLevelGet) {
+            void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+                if (data && data.length > 0) {
+                    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([obj isKindOfClass:[NSDictionary class]]) {
+                        NSDictionary *response = obj[@"response"];
+                        NSArray *list = [response isKindOfClass:[NSDictionary class]] ? response[@"task_list"] : nil;
+                        if ([list isKindOfClass:[NSArray class]] && list.count > 0) {
+                            _capturedTaskList = list;
+                            _capturedListDirty = YES;
+                            qqlog(@"[捕获] 客户端原生 levelTask/Get → %lu 个任务", (unsigned long)list.count);
+                        }
+                    }
+                }
+                if (completionHandler) completionHandler(data, resp, err);
+            };
+            return %orig(request, wrapped);
+        }
+        // v1.2.2: 顺带捕获 qun 域真实 p_skey（客户端访问群/好友页时带真实凭证，修复加好友 csrf error）
+        if ([url containsString:@"qun.qq.com"] && request.allHTTPHeaderFields[@"Cookie"]) {
+            NSString *ck = request.allHTTPHeaderFields[@"Cookie"];
+            NSArray *parts = [ck componentsSeparatedByString:@";"];
+            for (NSString *part in parts) {
+                NSString *trim = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if ([trim hasPrefix:@"p_skey="]) {
+                    NSString *val = [trim substringFromIndex:7];
+                    if (val.length >= 20) {
+                        _capturedQunPskey = val;
+                        qqlog(@"[捕获] qun 域真实 p_skey 已缓存 (len=%lu)", (unsigned long)val.length);
+                    }
+                }
+            }
+        }
         if (_captureEnabled) {
-            NSString *url = request.URL.absoluteString ?: @"";
             BOOL keyTask = isLevelKeyURL(url);
             if (keyTask) {
                 // 等级关键词：异步记录（URL+body），数量少可包装响应
@@ -397,6 +440,11 @@ static NSString *getPskey(NSString *domain, NSString *uin, int keyType) {
 // ── 拿 qun.qq.com 域 p_skey（加好友/删好友专用，qsped 抓包里带 * 的特殊 key）──
 //   多 keyType 尝试：qsped 抓包显示 qun 域 p_skey 与 ti 域不同（7AphPTUZBJ*... 带星号）
 static NSString *getQunPskey(NSString *uin) {
+    // v1.2.2: 优先用客户端原生请求捕获的真实 qun 域 p_skey（带星号，算 bkn 才正确）
+    if (_capturedQunPskey && _capturedQunPskey.length > 0) {
+        qqlog(@"[pskey] 用客户端捕获 qun 域 key (len=%lu)", (unsigned long)_capturedQunPskey.length);
+        return _capturedQunPskey;
+    }
     NSString *fallback = nil;
     for (NSString *domain in @[@"qun.qq.com", @"web.qun.qq.com", @"qunapp.qq.com"]) {
         for (int kt = 0; kt <= 3; kt++) {
@@ -1246,6 +1294,14 @@ static void renderTaskRows(void) {
 
 // ── 刷新任务列表（拉接口 → 渲染）──
 static void refreshTaskListUI(void) {
+    // v1.2.2: 优先用客户端原生捕获的全量任务列表（QQ 自己请求带 skey 全凭证，服务端给全量）
+    if (_capturedTaskList && _capturedTaskList.count > 0) {
+        _taskListCache = _capturedTaskList;
+        if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
+        appendLogView([NSString stringWithFormat:@"✅ 使用客户端原生全量 %lu 个任务", (unsigned long)_capturedTaskList.count]);
+        renderTaskRows();
+        return;
+    }
     appendLogView(@"🔄 拉取任务列表…");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *uin = getCurrentUin();
@@ -1261,6 +1317,7 @@ static void refreshTaskListUI(void) {
                 appendLogView([NSString stringWithFormat:@"✅ 拉取 %lu 个任务", (unsigned long)list.count]);
             } else {
                 appendLogView([NSString stringWithFormat:@"❌ 任务列表为空 (ret=%d, pskey=%@)", retCode, tiPskey ? @"有" : @"无"]);
+                appendLogView(@"💡 请点「🌐等级页」打开等级任务页，客户端会自动加载全量任务，再点「🔄获取」");
             }
             renderTaskRows();
         });
@@ -1547,6 +1604,16 @@ __attribute__((unused)) static void showLogPanel(void) {
     if (u && [[UIApplication sharedApplication] canOpenURL:u]) {
         [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
         appendLogView(@"已拉起等级页（Kuikly 渲染，等 3 秒进入）");
+        // v1.2.2: 等级页加载时客户端会自己请求 levelTask/Get(带 skey 全凭证)，
+        // 我们 hook 拦截响应存 _capturedTaskList → 2.5 秒后自动刷新面板显示全量
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (_capturedTaskList && _capturedTaskList.count > 0) {
+                appendLogView([NSString stringWithFormat:@"✅ 已从等级页捕获 %lu 个任务", (unsigned long)_capturedTaskList.count]);
+                refreshTaskListUI();
+            } else {
+                appendLogView(@"⏳ 等级页还在加载…再点一次「🔄获取」即可");
+            }
+        });
     } else {
         appendLogView(@"❌ 无法拉起深链，请手动: 头像→等级→额外活跃");
     }

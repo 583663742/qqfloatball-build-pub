@@ -209,6 +209,12 @@ static BOOL isLevelKeyURL(NSString *url) {
                 }
             }
         }
+        // v1.2.3: qqlevel 相关无条件记录 URL（找"额外活跃"33任务的真实接口，级别Get已在上方拦截）
+        if ([url containsString:@"qqlevel"] && !isLevelGet) {
+            NSString *body = request.HTTPBody ? [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding] : @"";
+            qqlogAsync(@"[NSURLSession] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url,
+                       body.length > 400 ? [body substringToIndex:400] : body);
+        }
         if (_captureEnabled) {
             BOOL keyTask = isLevelKeyURL(url);
             if (keyTask) {
@@ -297,12 +303,17 @@ static BOOL isLevelKeyURL(NSString *url) {
 
 + (void)requestWithMethod:(id)method url:(id)url param:(id)param headers:(id)headers timeout:(float)timeout cookie:(id)cookie responseBlock:(id)responseBlock {
     @try {
-        if (_captureEnabled) {
-            NSString *u = [url isKindOfClass:[NSString class]] ? url : @"";
+        NSString *u = [url isKindOfClass:[NSString class]] ? url : @"";
+        // v1.2.3: qqlevel 相关无条件记录（找"额外活跃"33任务的真实接口），其余按抓包开关
+        if ([u containsString:@"qqlevel"] || [u containsString:@"levelTask"] || [u containsString:@"GetUserRecord"]) {
+            NSString *m = [method isKindOfClass:[NSString class]] ? method : @"GET";
+            NSString *p = param ? [NSString stringWithFormat:@"%@", param] : @"";
+            qqlogAsync(@"[KRHttp] %@ %@ param=%@", m, u, p.length > 600 ? [p substringToIndex:600] : p);
+        } else if (_captureEnabled) {
+            NSString *m2 = [method isKindOfClass:[NSString class]] ? method : @"GET";
+            NSString *p2 = param ? [NSString stringWithFormat:@"%@", param] : @"";
             if (isLevelKeyURL(u)) {
-                NSString *m = [method isKindOfClass:[NSString class]] ? method : @"GET";
-                NSString *p = param ? [NSString stringWithFormat:@"%@", param] : @"";
-                qqlogAsync(@"[KRHttp] %@ %@ param=%@", m, u, p.length > 500 ? [p substringToIndex:500] : p);
+                qqlogAsync(@"[KRHttp] %@ %@ param=%@", m2, u, p2.length > 500 ? [p2 substringToIndex:500] : p2);
             } else if (!_captureOnlyTasks) {
                 qqlogAsync(@"[KRHttp] %@ %@", method ?: @"GET", u);
             }
@@ -318,8 +329,11 @@ static BOOL isLevelKeyURL(NSString *url) {
 
 - (void)setRequestUrl:(NSString *)requestUrl {
     @try {
-        if (_captureEnabled) {
-            NSString *u = requestUrl ?: @"";
+        NSString *u = requestUrl ?: @"";
+        // v1.2.3: qqlevel 相关无条件记录（找"额外活跃"33任务的真实接口）
+        if ([u containsString:@"qqlevel"] || [u containsString:@"levelTask"] || [u containsString:@"GetUserRecord"]) {
+            qqlogAsync(@"[QQCR] setRequestUrl=%@", u);
+        } else if (_captureEnabled) {
             if (isLevelKeyURL(u)) {
                 qqlogAsync(@"[QQCR] setRequestUrl=%@", u);
             } else if (!_captureOnlyTasks) {

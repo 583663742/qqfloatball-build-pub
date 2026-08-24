@@ -2208,11 +2208,11 @@ __attribute__((unused)) static void dumpPSKeys(void) {
     return self;
 }
 - (void)contentViewDidLoadWithrenderView:(id)arg1 {
-    qqlog(@"[KuiklyVC] contentViewDidLoad pageName=%@ view=%@", [self valueForKey:@"pageName"], arg1);
+    qqlog(@"[KuiklyVC] contentViewDidLoad pageName=%@ view=%@", [(id)self valueForKey:@"pageName"], arg1);
     %orig;
 }
 - (void)viewDidAppear {
-    qqlog(@"[KuiklyVC] viewDidAppear pageName=%@", [self valueForKey:@"pageName"]);
+    qqlog(@"[KuiklyVC] viewDidAppear pageName=%@", [(id)self valueForKey:@"pageName"]);
     %orig;
 }
 %end
@@ -2220,11 +2220,11 @@ __attribute__((unused)) static void dumpPSKeys(void) {
 %hook KuiklyRenderView
 - (id)initWithSize:(CGSize)arg1 contextCode:(id)arg2 contextParam:(id)arg3 params:(id)arg4 delegate:(id)arg5 {
     self = %orig;
-    qqlog(@"[KuiklyView] init pageName=%@ size=%@", [self valueForKey:@"pageName"], NSStringFromCGSize(arg1));
+    qqlog(@"[KuiklyView] init pageName=%@ size=%@", [(id)self valueForKey:@"pageName"], NSStringFromCGSize(arg1));
     return self;
 }
 - (void)viewDidAppear {
-    qqlog(@"[KuiklyView] viewDidAppear pageName=%@", [self valueForKey:@"pageName"]);
+    qqlog(@"[KuiklyView] viewDidAppear pageName=%@", [(id)self valueForKey:@"pageName"]);
     %orig;
 }
 %end

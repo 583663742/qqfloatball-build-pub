@@ -1728,5 +1728,11 @@ static void qqfloatball_ctor(void) {
             // 在主队列等 2 秒再试
             [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.0]];
         }
+        // v1.1.3：球建好后默认自动打开任务面板（右上角），打开界面即可见日志
+        if (_floatBall) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showTaskPanel();
+            });
+        }
     });
 }

@@ -872,7 +872,8 @@ static void dumpTextViews(void) {
         NSMutableString *outS = [NSMutableString string];
         [outS appendString:@"\n═══ 视图文字 dump ═══\n"];
         __block int count = 0;
-        void (^walk)(UIView *, int) = ^(UIView *view, int depth) {
+        __block void (^walk)(UIView *, int);
+        void (^walkImpl)(UIView *, int) = ^(UIView *view, int depth) {
             if (count > 60 || depth > 12) return;
             @try {
                 NSString *txt = nil;
@@ -887,6 +888,7 @@ static void dumpTextViews(void) {
             } @catch (NSException *e) {}
             for (UIView *sub in view.subviews) walk(sub, depth + 1);
         };
+        walk = walkImpl;
         walk(win, 0);
         [outS appendString:@"═══ end ═══"];
         qqlog(@"%@", outS);

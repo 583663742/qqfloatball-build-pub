@@ -194,6 +194,18 @@ static BOOL isLevelKeyURL(NSString *url) {
             };
             return %orig(request, wrapped);
         }
+        // v1.2.4: GetUserRecord = 等级页"额外活跃"任务真实接口(分页 num:10 startIndex:0..n)！
+        //  拦截响应：任务在 data.user_record_list 或类似字段，先打印结构再解析
+        if ([url containsString:@"GetUserRecord"]) {
+            void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+                if (data && data.length > 0) {
+                    NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    qqlog(@"[捕获] GetUserRecord 响应: %@", respStr.length > 1500 ? [respStr substringToIndex:1500] : respStr);
+                }
+                if (completionHandler) completionHandler(data, resp, err);
+            };
+            return %orig(request, wrapped);
+        }
         // v1.2.2: 顺带捕获 qun 域真实 p_skey（客户端访问群/好友页时带真实凭证，修复加好友 csrf error）
         if ([url containsString:@"qun.qq.com"] && request.allHTTPHeaderFields[@"Cookie"]) {
             NSString *ck = request.allHTTPHeaderFields[@"Cookie"];
@@ -798,8 +810,10 @@ static void openLevelPage(void) {
 // ══════════════════════════════════════════
 
 // ── 递归找含指定文字的视图（UILabel/UIButton/accessibilityLabel）──
-static UIView *findViewWithText(UIView *root, NSString *text) {
+//  v1.2.4: ①跳过我们自己的任务面板(_taskPanel) ②遍历所有 window(等级页 Kuikly 是独立 window, keyWindow 可能是我们的悬浮窗)
+static UIView *findViewWithTextInView(UIView *root, NSString *text) {
     if (!root || text.length == 0) return nil;
+    if (root == _taskPanel) return nil; // 不进自己面板
     @try {
         NSString *selfText = nil;
         if ([root isKindOfClass:[UILabel class]]) {
@@ -811,7 +825,17 @@ static UIView *findViewWithText(UIView *root, NSString *text) {
         }
         if (selfText && selfText.length > 0 && [selfText containsString:text]) return root;
         for (UIView *sub in root.subviews) {
-            UIView *found = findViewWithText(sub, text);
+            UIView *found = findViewWithTextInView(sub, text);
+            if (found) return found;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+static UIView *findViewWithText(UIView *ignore, NSString *text) {
+    @try {
+        for (UIWindow *win in [UIApplication sharedApplication].windows) {
+            if (win == ignore) continue;
+            UIView *found = findViewWithTextInView(win, text);
             if (found) return found;
         }
     } @catch (NSException *e) {}
@@ -864,17 +888,16 @@ static BOOL tapView(UIView *v) {
     return NO;
 }
 
-// ── dump 当前窗口所有含文字的视图（调试：找不到目标时看页面结构）──
+// ── dump 所有窗口的含文字视图（调试：找不到目标时看页面结构）──
 static void dumpTextViews(void) {
     @try {
-        UIWindow *win = [UIApplication sharedApplication].keyWindow;
-        if (!win) return;
         NSMutableString *outS = [NSMutableString string];
-        [outS appendString:@"\n═══ 视图文字 dump ═══\n"];
+        [outS appendString:@"\n═══ 视图文字 dump（所有 window）═══\n"];
         __block int count = 0;
         __block void (^walk)(UIView *, int);
         void (^walkImpl)(UIView *, int) = ^(UIView *view, int depth) {
-            if (count > 60 || depth > 12) return;
+            if (count > 80 || depth > 12) return;
+            if (view == _taskPanel) return;
             @try {
                 NSString *txt = nil;
                 if ([view isKindOfClass:[UILabel class]]) txt = ((UILabel *)view).text;
@@ -889,7 +912,10 @@ static void dumpTextViews(void) {
             for (UIView *sub in view.subviews) walk(sub, depth + 1);
         };
         walk = walkImpl;
-        walk(win, 0);
+        for (UIWindow *win in [UIApplication sharedApplication].windows) {
+            [outS appendFormat:@"─ window: %@\n", NSStringFromClass([win class])];
+            walk(win, 0);
+        }
         [outS appendString:@"═══ end ═══"];
         qqlog(@"%@", outS);
     } @catch (NSException *e) {}
@@ -1713,6 +1739,14 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
     appendLogView(@"🌐 自动流程：等级页→额外活跃→展开→获取");
     qqlog(@"[action] 打开等级页(自动流程 v1.2.4)");
+    // 先收起自己的面板(避免悬浮球/面板挡住等级页操作 + findViewWithText 误扫到自己)
+    if (_taskPanel) {
+        [_taskPanel removeFromSuperview];
+        _taskPanel = nil;
+        _logView = nil;
+        _logTextView = nil;
+        _taskScroll = nil;
+    }
     // 等级页 = Kuikly 原生渲染，用深链打开（task-center 页面自身会跳 Kuikly）
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
@@ -1730,7 +1764,7 @@ __attribute__((unused)) static void showLogPanel(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (step != 1) return; step = 2;
         appendLogView(@"② 找「额外活跃」分页…");
-        UIView *tab = findViewWithText([UIApplication sharedApplication].keyWindow, @"额外活跃");
+        UIView *tab = findViewWithText(nil, @"额外活跃");
         if (tab) {
             appendLogView(@"✅ 找到「额外活跃」，点击切换…");
             qqlog(@"[UI自动化] 点击「额外活跃」 tab");
@@ -1743,7 +1777,7 @@ __attribute__((unused)) static void showLogPanel(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (step != 2) return; step = 3;
             appendLogView(@"③ 找「展开」按钮…");
-            UIView *exp = findViewWithText([UIApplication sharedApplication].keyWindow, @"展开");
+            UIView *exp = findViewWithText(nil, @"展开");
             if (exp) {
                 appendLogView(@"✅ 找到「展开」，点击展开全部任务…");
                 qqlog(@"[UI自动化] 点击「展开」");

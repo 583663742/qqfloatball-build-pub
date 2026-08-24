@@ -865,19 +865,6 @@ static BOOL runLikeTask(NSString *uin, NSString *targetUin) {
     return YES;
 }
 
-// ── 测试模式：加好友 → 验证 → 删好友（用户定案 v1.1.0）──
-static void runTestFriendTask(NSString *uin, NSString *targetUin) {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        qqlog(@"[测试] ══ 加好友→删好友 测试开始 ══");
-        BOOL addOK = runAddFriendTask(uin, targetUin);
-        qqlog(@"[测试] 加好友结果: %@", addOK ? @"已发请求" : @"失败");
-        [NSThread sleepForTimeInterval:3];
-        BOOL rmOK = runRemoveFriendTask(uin, targetUin);
-        qqlog(@"[测试] 删好友结果: %@", rmOK ? @"已发请求" : @"失败");
-        qqlog(@"[测试] ══ 测试结束（日志见上，响应已记录）══");
-    });
-}
-
 // ── 按任务标题分派执行（点「做」按钮走这里）──
 static void execTaskByTitle(NSString *title, NSString *uin) {
     if (!title) return;
@@ -1043,23 +1030,119 @@ static NSString *taskDaysText(NSDictionary *task) {
     return @"";
 }
 
-// ── 渲染任务列表（先清空再重建）──
+// ── 内置任务定义（v1.2.0：已实锤纯后台接口，可单独测试）──
+//  勾选用 key = builtin_<idx>，与额外活跃任务的 task_id 区分
+static NSArray *builtinTaskDefs(void) {
+    return @[
+        @{@"title": @"日签卡打卡", @"needTarget": @NO},
+        @{@"title": @"加好友", @"needTarget": @YES},
+        @{@"title": @"删好友", @"needTarget": @YES},
+        @{@"title": @"发空间说说", @"needTarget": @NO},
+        @{@"title": @"空间点赞", @"needTarget": @YES},
+        @{@"title": @"金币兑换加速", @"needTarget": @NO},
+    ];
+}
+
+// ── 执行内置任务（idx 对应 builtinTaskDefs 下标）──
+static BOOL execBuiltinTask(int idx, NSString *uin, NSString *targetUin) {
+    switch (idx) {
+        case 0: return runDailySignTask(uin);
+        case 1: return runAddFriendTask(uin, targetUin);
+        case 2: return runRemoveFriendTask(uin, targetUin);
+        case 3: return runShuoshuoTask(uin, @"等级任务打卡");
+        case 4: return runLikeTask(uin, targetUin);
+        case 5: return runCoinExchangeTask(uin);
+        default: return NO;
+    }
+}
+
+// ── 渲染任务列表（v1.2.0：内置任务组 + 额外活跃任务组）──
 static void renderTaskRows(void) {
     if (!_taskScroll) return;
     for (UIView *sub in _taskScroll.subviews) [sub removeFromSuperview];
+    CGFloat y = 6;
+    CGFloat rowH = 46;
+    CGFloat w = _taskScroll.bounds.size.width;
+
+    // ── 组1: 内置任务（可单独测试）──
+    NSArray *builtin = builtinTaskDefs();
+    if (builtin.count > 0) {
+        UILabel *grpLb = [[UILabel alloc] initWithFrame:CGRectMake(10, y, w - 20, 20)];
+        grpLb.text = @"⬡ 内置任务（已实锤接口，可单测）";
+        grpLb.textColor = [UIColor systemCyanColor];
+        grpLb.font = [UIFont boldSystemFontOfSize:11];
+        [_taskScroll addSubview:grpLb];
+        y += 22;
+        for (int i = 0; i < (int)builtin.count; i++) {
+            NSDictionary *def = builtin[i];
+            NSString *title = def[@"title"] ?: @"?";
+            UIView *row = [[UIView alloc] initWithFrame:CGRectMake(6, y, w - 12, rowH)];
+            row.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+            row.layer.cornerRadius = 8;
+            row.userInteractionEnabled = YES;
+
+            // 勾选框
+            UIButton *chk = [UIButton buttonWithType:UIButtonTypeCustom];
+            chk.frame = CGRectMake(8, (rowH - 28) / 2.0, 28, 28);
+            chk.tag = i;
+            NSString *bid = [NSString stringWithFormat:@"builtin_%d", i];
+            BOOL checked = _checkedTaskIds && [_checkedTaskIds containsObject:bid];
+            [chk setTitle:checked ? @"☑" : @"☐" forState:UIControlStateNormal];
+            [chk setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            chk.titleLabel.font = [UIFont systemFontOfSize:18];
+            [chk addTarget:[UIApplication sharedApplication] action:@selector(_builtinCheckTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addSubview:chk];
+
+            // 标题
+            UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(42, 4, w - 12 - 42 - 100, 26)];
+            tl.text = title;
+            tl.textColor = [UIColor whiteColor];
+            tl.font = [UIFont systemFontOfSize:12];
+            tl.numberOfLines = 1;
+            tl.lineBreakMode = NSLineBreakByTruncatingTail;
+            [row addSubview:tl];
+
+            // 加速天数占位（内置任务固定 +0.5）
+            UILabel *dl = [[UILabel alloc] initWithFrame:CGRectMake(w - 12 - 8 - 74, 4, 74, 18)];
+            dl.text = @"+0.5天";
+            dl.textColor = [UIColor systemYellowColor];
+            dl.font = [UIFont systemFontOfSize:11];
+            dl.textAlignment = NSTextAlignmentRight;
+            [row addSubview:dl];
+
+            // 测试按钮（单个测试）
+            UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+            testBtn.frame = CGRectMake(w - 12 - 8 - 74, 24, 74, 18);
+            testBtn.tag = i;
+            [testBtn setTitle:@"▶ 测试" forState:UIControlStateNormal];
+            [testBtn setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
+            testBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+            [testBtn addTarget:[UIApplication sharedApplication] action:@selector(_builtinTestTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addSubview:testBtn];
+
+            [_taskScroll addSubview:row];
+            y += rowH + 4;
+        }
+        y += 6;
+    }
+
+    // ── 组2: 额外活跃任务（一键获取自等级页数据源）──
     NSArray *list = _taskListCache;
     if (!list || list.count == 0) {
-        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(10, 10, _taskScroll.bounds.size.width - 20, 40)];
-        empty.text = @"任务列表为空，点「刷新」重试";
+        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(10, y, w - 20, 40)];
+        empty.text = @"额外活跃任务为空，点「🔄获取」拉取";
         empty.textColor = [UIColor whiteColor];
         empty.font = [UIFont systemFontOfSize:12];
         empty.numberOfLines = 0;
         [_taskScroll addSubview:empty];
         return;
     }
-    CGFloat y = 6;
-    CGFloat rowH = 46;
-    CGFloat w = _taskScroll.bounds.size.width;
+    UILabel *grpLb2 = [[UILabel alloc] initWithFrame:CGRectMake(10, y, w - 20, 20)];
+    grpLb2.text = [NSString stringWithFormat:@"☀ 额外活跃任务（%lu 个）", (unsigned long)list.count];
+    grpLb2.textColor = [UIColor systemYellowColor];
+    grpLb2.font = [UIFont boldSystemFontOfSize:11];
+    [_taskScroll addSubview:grpLb2];
+    y += 22;
     for (int i = 0; i < (int)list.count; i++) {
         NSDictionary *task = list[i];
         if (![task isKindOfClass:[NSDictionary class]]) continue;
@@ -1067,7 +1150,6 @@ static void renderTaskRows(void) {
         NSString *tid = task[@"task_id"] ?: @"";
         NSString *days = taskDaysText(task);
         NSString *status = taskStatusText(task);
-        NSString *btnText = task[@"button_text"] ?: @"";
 
         UIView *row = [[UIView alloc] initWithFrame:CGRectMake(6, y, w - 12, rowH)];
         row.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
@@ -1214,27 +1296,38 @@ static void showTaskPanel(void) {
     _taskScroll = scroll;
     [panel addSubview:scroll];
 
-    // 底部按钮区
+    // 底部按钮区（v1.2.0: 获取任务 / 执行勾选 / 打开等级页）
     CGFloat by = h - 128;
-    UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    testBtn.frame = CGRectMake(10, by, (w - 30) / 2.0, 34);
-    testBtn.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.85];
-    testBtn.layer.cornerRadius = 8;
-    [testBtn setTitle:@"🧪 测试加好友" forState:UIControlStateNormal];
-    [testBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    testBtn.titleLabel.font = [UIFont systemFontOfSize:12];
-    [testBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskTestFriendTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:testBtn];
+    CGFloat btnW = (w - 30 - 8) / 3.0;
+    UIButton *refreshBtn2 = [UIButton buttonWithType:UIButtonTypeCustom];
+    refreshBtn2.frame = CGRectMake(10, by, btnW, 34);
+    refreshBtn2.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.85];
+    refreshBtn2.layer.cornerRadius = 8;
+    [refreshBtn2 setTitle:@"🔄 获取" forState:UIControlStateNormal];
+    [refreshBtn2 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    refreshBtn2.titleLabel.font = [UIFont systemFontOfSize:12];
+    [refreshBtn2 addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:refreshBtn2];
 
     UIButton *execBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    execBtn.frame = CGRectMake(20 + (w - 30) / 2.0, by, (w - 30) / 2.0, 34);
+    execBtn.frame = CGRectMake(14 + btnW, by, btnW, 34);
     execBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
     execBtn.layer.cornerRadius = 8;
-    [execBtn setTitle:@"▶ 执行勾选" forState:UIControlStateNormal];
+    [execBtn setTitle:@"▶ 执行" forState:UIControlStateNormal];
     [execBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     execBtn.titleLabel.font = [UIFont systemFontOfSize:12];
     [execBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskExecCheckedTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:execBtn];
+
+    UIButton *lvBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    lvBtn.frame = CGRectMake(18 + btnW * 2, by, btnW, 34);
+    lvBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
+    lvBtn.layer.cornerRadius = 8;
+    [lvBtn setTitle:@"🌐 等级页" forState:UIControlStateNormal];
+    [lvBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    lvBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    [lvBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:lvBtn];
 
     // 日志区（内嵌，复用 _logTextView，v1.1.0 加高到 80 显示更全）
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, h - 86, w - 12, 80)];
@@ -1309,10 +1402,12 @@ __attribute__((unused)) static void showLogPanel(void) {
 @interface UIApplication (QQFloatBallLog)
 - (void)_closeLogPanel:(UIButton *)sender;
 - (void)_taskCheckTapped:(UIButton *)sender;
+- (void)_builtinCheckTapped:(UIButton *)sender;
+- (void)_builtinTestTapped:(UIButton *)sender;
 - (void)_taskRefreshTapped:(UIButton *)sender;
 - (void)_taskCloseTapped:(UIButton *)sender;
-- (void)_taskTestFriendTapped:(UIButton *)sender;
 - (void)_taskExecCheckedTapped:(UIButton *)sender;
+- (void)_taskOpenLevelPageTapped:(UIButton *)sender;
 @end
 
 %hook UIApplication
@@ -1348,6 +1443,36 @@ __attribute__((unused)) static void showLogPanel(void) {
 }
 
 %new
+- (void)_builtinCheckTapped:(UIButton *)sender {
+    int idx = (int)sender.tag;
+    NSArray *builtin = builtinTaskDefs();
+    if (idx < 0 || idx >= (int)builtin.count) return;
+    NSString *bid = [NSString stringWithFormat:@"builtin_%d", idx];
+    if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
+    if ([_checkedTaskIds containsObject:bid]) {
+        [_checkedTaskIds removeObject:bid];
+    } else {
+        [_checkedTaskIds addObject:bid];
+    }
+    renderTaskRows();
+    appendLogView([NSString stringWithFormat:@"☑ 勾选: %@", builtin[idx][@"title"]]);
+}
+
+%new
+- (void)_builtinTestTapped:(UIButton *)sender {
+    int idx = (int)sender.tag;
+    NSArray *builtin = builtinTaskDefs();
+    if (idx < 0 || idx >= (int)builtin.count) return;
+    NSString *title = builtin[idx][@"title"];
+    NSString *uin = getCurrentUin();
+    appendLogView([NSString stringWithFormat:@"🧪 测试: %@", title]);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        BOOL ok = execBuiltinTask(idx, uin, _friendRobotUin);
+        appendLogView([NSString stringWithFormat:@"%@ %@: %@", ok ? @"✅" : @"❌", title, ok ? @"已执行(详见日志)" : @"失败(详见日志)"]);
+    });
+}
+
+%new
 - (void)_taskRefreshTapped:(UIButton *)sender {
     refreshTaskListUI();
 }
@@ -1364,11 +1489,21 @@ __attribute__((unused)) static void showLogPanel(void) {
 }
 
 %new
-- (void)_taskTestFriendTapped:(UIButton *)sender {
-    qqlog(@"[action] 测试加好友 → 删好友");
-    appendLogView(@"🧪 测试开始：加好友→删好友…");
-    NSString *uin = getCurrentUin();
-    runTestFriendTask(uin, _friendRobotUin);
+- (void)_taskOpenLevelPageTapped:(UIButton *)sender {
+    appendLogView(@"🌐 打开等级任务页…");
+    qqlog(@"[action] 打开等级页");
+    // 等级页 = Kuikly 原生渲染，用深链打开（task-center 页面自身会跳 Kuikly）
+    NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
+    NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *b64 = [bd base64EncodedStringWithOptions:0];
+    NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
+    NSURL *u = [NSURL URLWithString:deep];
+    if (u && [[UIApplication sharedApplication] canOpenURL:u]) {
+        [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+        appendLogView(@"已拉起等级页（Kuikly 渲染，等 3 秒进入）");
+    } else {
+        appendLogView(@"❌ 无法拉起深链，请手动: 头像→等级→额外活跃");
+    }
 }
 
 %new
@@ -1380,6 +1515,17 @@ __attribute__((unused)) static void showLogPanel(void) {
     NSString *uin = getCurrentUin();
     appendLogView([NSString stringWithFormat:@"▶ 开始执行 %lu 个勾选任务…", (unsigned long)_checkedTaskIds.count]);
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // 先执行内置任务组
+        NSArray *builtin = builtinTaskDefs();
+        for (int i = 0; i < (int)builtin.count; i++) {
+            NSString *bid = [NSString stringWithFormat:@"builtin_%d", i];
+            if (![_checkedTaskIds containsObject:bid]) continue;
+            NSString *title = builtin[i][@"title"];
+            qqlog(@"[任务] ── 执行内置: %@ ──", title);
+            execBuiltinTask(i, uin, _friendRobotUin);
+            [NSThread sleepForTimeInterval:2];
+        }
+        // 再执行额外活跃任务组
         for (NSDictionary *task in _taskListCache) {
             if (![task isKindOfClass:[NSDictionary class]]) continue;
             NSString *tid = task[@"task_id"] ?: @"";

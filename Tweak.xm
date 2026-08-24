@@ -464,6 +464,47 @@ static NSDictionary *httpPostJSON(NSString *url, NSDictionary *bodyDict, NSStrin
     return nil;
 }
 
+// ── 同步 POST JSON + 自定义额外 header（v1.2.1 拉全量任务用）──
+static NSDictionary *httpPostJSONEx(NSString *url, NSDictionary *bodyDict, NSString *cookieHeader,
+                                    int timeoutSec, NSDictionary *extraHeaders) {
+    @try {
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        if (cookieHeader) [req setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+        for (NSString *k in extraHeaders.allKeys) {
+            NSString *v = extraHeaders[k];
+            if (v) [req setValue:v forHTTPHeaderField:k];
+        }
+        NSData *bodyData = [NSJSONSerialization dataWithJSONObject:bodyDict options:0 error:nil];
+        req.HTTPBody = bodyData;
+
+        __block NSDictionary *result = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.timeoutIntervalForRequest = timeoutSec;
+        cfg.timeoutIntervalForResource = timeoutSec + 5;
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+        [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if (!err && data) {
+                id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([obj isKindOfClass:[NSDictionary class]]) {
+                    result = obj;
+                } else if ([obj isKindOfClass:[NSArray class]]) {
+                    result = @{@"data_array": obj};
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (timeoutSec + 10) * NSEC_PER_SEC));
+        [session finishTasksAndInvalidate];
+        return result;
+    } @catch (NSException *e) {
+        qqlog(@"[http] 异常 %@", e);
+    }
+    return nil;
+}
+
 // ── 同步 POST 原始文本（支持任意 body 字符串 + 额外 header），返回完整响应文本 ──
 static NSString *httpPostText(NSString *url, NSString *bodyString, NSString *contentType,
                               NSString *cookieHeader, NSDictionary *extraHeaders, int timeoutSec) {
@@ -516,12 +557,17 @@ static NSString *getSkey(NSString *uin) {
 }
 
 // ── 拉取任务列表：levelTask/Get ──
+//  v1.2.1: mode 用 "all"(安卓实锤) 而非 42，避免 iOS 审核过滤只回 10 个任务；
+//          UA 用安卓 MQQBrowser(与 qsped 安卓端一致)，服务端按平台/模式决定 is_ios_review_hide
 static NSArray *fetchTaskList(NSString *uin, NSString *tiPskey, int *retCodeOut) {
     @try {
         int bkn = hash33(tiPskey);
         NSString *url = [NSString stringWithFormat:@"https://ti.qq.com/qqlevel/trpc/levelTask/Get?bkn=%d", bkn];
         NSString *cookie = [NSString stringWithFormat:@"uin=o%@; p_uin=o%@; p_skey=%@", uin, uin, tiPskey];
-        NSDictionary *resp = httpPostJSON(url, @{@"mode": @42}, cookie, 15);
+        NSDictionary *resp = httpPostJSONEx(url, @{@"mode": @"all"}, cookie, 15,
+            @{@"User-Agent": @"MQQBrowser/6.2 TBS/046905 QQ/9.0.0 V1_AND_SQ_9.0.0_0_YYB_A",
+              @"Origin": @"https://ti.qq.com",
+              @"Referer": @"https://ti.qq.com/qqlevel/task-center?version=2"});
         if (!resp) {
             if (retCodeOut) *retCodeOut = -1;
             qqlog(@"[taskList] 无响应");

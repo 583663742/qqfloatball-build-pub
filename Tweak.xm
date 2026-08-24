@@ -2171,6 +2171,64 @@ __attribute__((unused)) static void dumpPSKeys(void) {
 }
 %end
 
+// ══════════════════════════════════════════
+//  Kuikly 等级页生命周期监控（v1.2.6）
+//  头文件实锤: QQKuiklyService.jumpKuiklyPageWithWebUrl: 是 web→Kuikly 跳转入口;
+//  KuiklyRenderViewControllerDelegator 持有每个 Kuikly 页面的 pageName/renderView
+//  目的: 确认等级页打开链路 + 拿到等级页 renderView 以便操作(切分页/点展开)
+// ══════════════════════════════════════════
+%hook QQKuiklyService
++ (BOOL)jumpKuiklyPageWithWebUrl:(id)url {
+    qqlog(@"[Kuikly] jumpKuiklyPageWithWebUrl: %@", url);
+    BOOL r = %orig;
+    qqlog(@"[Kuikly] jumpKuiklyPageWithWebUrl → %d", r);
+    return r;
+}
++ (BOOL)tryTojumpKuiklyPageWithWebUrl:(id)url {
+    qqlog(@"[Kuikly] tryTojumpKuiklyPageWithWebUrl: %@", url);
+    BOOL r = %orig;
+    qqlog(@"[Kuikly] tryTojumpKuiklyPageWithWebUrl → %d", r);
+    return r;
+}
++ (id)pageNameFromUrl:(id)url {
+    id r = %orig;
+    qqlog(@"[Kuikly] pageNameFromUrl: %@ → %@", url, r);
+    return r;
+}
++ (void)handleSchemeNotifiction:(id)arg1 {
+    qqlog(@"[Kuikly] handleSchemeNotifiction: %@", arg1);
+    %orig;
+}
+%end
+
+%hook KuiklyRenderViewControllerDelegator
+- (id)initWithPageName:(id)arg1 pageData:(id)arg2 {
+    self = %orig;
+    qqlog(@"[KuiklyVC] init pageName=%@ pageData=%@", arg1, arg2);
+    return self;
+}
+- (void)contentViewDidLoadWithrenderView:(id)arg1 {
+    qqlog(@"[KuiklyVC] contentViewDidLoad pageName=%@ view=%@", self.pageName, arg1);
+    %orig;
+}
+- (void)viewDidAppear {
+    qqlog(@"[KuiklyVC] viewDidAppear pageName=%@", self.pageName);
+    %orig;
+}
+%end
+
+%hook KuiklyRenderView
+- (id)initWithSize:(CGSize)arg1 contextCode:(id)arg2 contextParam:(id)arg3 params:(id)arg4 delegate:(id)arg5 {
+    self = %orig;
+    qqlog(@"[KuiklyView] init pageName=%@ size=%@", self.pageName, NSStringFromCGSize(arg1));
+    return self;
+}
+- (void)viewDidAppear {
+    qqlog(@"[KuiklyView] viewDidAppear pageName=%@", self.pageName);
+    %orig;
+}
+%end
+
 // ── 构造器：dylib 加载即重试创建悬浮球（不依赖 setDelegate hook）──
 __attribute__((constructor))
 static void qqfloatball_ctor(void) {

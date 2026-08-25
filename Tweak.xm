@@ -44,6 +44,8 @@ static BOOL _captureOnlyTasks = NO;
 
 // ── 一键任务执行状态 ──
 static BOOL _taskRunning = NO;
+// ── v1.2.8: 自动流程运行中标志(防止重复触发 + 流程期间临时隐藏悬浮球) ──
+static BOOL _autoFlowRunning = NO;
 
 // ── 网络抓包日志（写入 app 沙盒 Documents，SSH 可读）──
 static NSString *qqlogPath(void) {
@@ -812,9 +814,12 @@ static void openLevelPage(void) {
 
 // ── 递归找含指定文字的视图（UILabel/UIButton/accessibilityLabel）──
 //  v1.2.4: ①跳过我们自己的任务面板(_taskPanel) ②遍历所有 window(等级页 Kuikly 是独立 window, keyWindow 可能是我们的悬浮窗)
-static UIView *findViewWithTextInView(UIView *root, NSString *text) {
+//  v1.2.8: ①每层递归前检查 view.window 非 nil(已从层级移除的视图直接跳过,防 EXC_BAD_ACCESS) ②遍历上限防深递归
+static UIView *findViewWithTextInView(UIView *root, NSString *text, int depth) {
     if (!root || text.length == 0) return nil;
-    if (root == _taskPanel) return nil; // 不进自己面板
+    if (depth > 20) return nil;                    // 防深递归失控
+    if (root == _taskPanel) return nil;            // 不进自己面板
+    if (!root.window) return nil;                  // v1.2.8: 已脱离层级视图直接跳过(防野指针)
     @try {
         NSString *selfText = nil;
         if ([root isKindOfClass:[UILabel class]]) {
@@ -825,8 +830,9 @@ static UIView *findViewWithTextInView(UIView *root, NSString *text) {
             selfText = root.accessibilityLabel;
         }
         if (selfText && selfText.length > 0 && [selfText containsString:text]) return root;
-        for (UIView *sub in root.subviews) {
-            UIView *found = findViewWithTextInView(sub, text);
+        NSArray *subs = [NSArray arrayWithArray:root.subviews]; // v1.2.8: 快照,防遍历中 subviews 被改
+        for (UIView *sub in subs) {
+            UIView *found = findViewWithTextInView(sub, text, depth + 1);
             if (found) return found;
         }
     } @catch (NSException *e) {}
@@ -834,9 +840,12 @@ static UIView *findViewWithTextInView(UIView *root, NSString *text) {
 }
 static UIView *findViewWithText(UIView *ignore, NSString *text) {
     @try {
-        for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        // v1.2.8: windows 快照,防遍历中数组被改(用户点球/页面切换会增删 window)
+        NSArray *wins = [NSArray arrayWithArray:[UIApplication sharedApplication].windows];
+        for (UIWindow *win in wins) {
             if (win == ignore) continue;
-            UIView *found = findViewWithTextInView(win, text);
+            if (!win.window) continue;             // 已失效 window 跳过
+            UIView *found = findViewWithTextInView(win, text, 0);
             if (found) return found;
         }
     } @catch (NSException *e) {}
@@ -846,6 +855,7 @@ static UIView *findViewWithText(UIView *ignore, NSString *text) {
 // ── 模拟点击视图：优先 UIControl sendActions，否则找父链上带 UITapGestureRecognizer 的 view ──
 static BOOL tapView(UIView *v) {
     if (!v) return NO;
+    if (!v.window) return NO;   // v1.2.8: 已脱离层级,点了也白点,防野指针
     @try {
         UIView *cur = v;
         while (cur) {
@@ -1740,8 +1750,10 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
-    appendLogView(@"🌐 自动流程：等级页→额外活跃→展开→获取");
-    qqlog(@"[action] 打开等级页(自动流程 v1.2.4)");
+    if (_autoFlowRunning) return;   // v1.2.8: 流程互斥,防止重复触发
+    _autoFlowRunning = YES;
+    appendLogView(@"[自动流程] 等级页→额外活跃→获取任务 (v1.2.8)");
+    qqlog(@"[action] 打开等级页(自动流程 v1.2.8)");
     // 先收起自己的面板(避免悬浮球/面板挡住等级页操作 + findViewWithText 误扫到自己)
     if (_taskPanel) {
         [_taskPanel removeFromSuperview];
@@ -1750,6 +1762,9 @@ __attribute__((unused)) static void showLogPanel(void) {
         _logTextView = nil;
         _taskScroll = nil;
     }
+    // v1.2.8: 自动流程期间隐藏悬浮球,防止用户点球导致视图树变动(上次闪退根因)
+    if (_floatBall) _floatBall.hidden = YES;
+
     // 等级页 = Kuikly 原生渲染，用深链打开（task-center 页面自身会跳 Kuikly）
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
@@ -1758,6 +1773,8 @@ __attribute__((unused)) static void showLogPanel(void) {
     NSURL *u = [NSURL URLWithString:deep];
     if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
         appendLogView(@"❌ 无法拉起深链，请手动: 头像→等级→额外活跃");
+        if (_floatBall) _floatBall.hidden = NO;
+        _autoFlowRunning = NO;
         return;
     }
     [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
@@ -1765,6 +1782,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 
     __block int step = 1;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!_autoFlowRunning) return;   // v1.2.8: 流程被中断则不再继续
         if (step != 1) return; step = 2;
         appendLogView(@"② 找「额外活跃」分页…");
         UIView *tab = findViewWithText(nil, @"额外活跃");
@@ -1775,33 +1793,36 @@ __attribute__((unused)) static void showLogPanel(void) {
         } else {
             appendLogView(@"⚠️ 没找到「额外活跃」，dump 视图文字看结构");
             dumpTextViews();
+            if (_floatBall) _floatBall.hidden = NO;
+            _autoFlowRunning = NO;
             return;
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (step != 2) return; step = 3;
-            appendLogView(@"③ 找「展开」按钮…");
-            UIView *exp = findViewWithText(nil, @"展开");
-            if (exp) {
-                appendLogView(@"✅ 找到「展开」，点击展开全部任务…");
-                qqlog(@"[UI自动化] 点击「展开」");
-                tapView(exp);
+        // v1.2.8: 不再找「展开」——点击额外活跃后客户端会自动发 levelTask/Get(带全凭证),
+        //          响应被拦截存进 _capturedTaskList。只需等 2.5 秒捕获后刷新面板即可。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!_autoFlowRunning) return;
+            appendLogView(@"③ 等待客户端 levelTask/Get 响应…");
+            if (_capturedTaskList && _capturedTaskList.count > 0) {
+                _taskListCache = _capturedTaskList;
+                appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
+                refreshTaskListUI();
             } else {
-                appendLogView(@"⚠️ 没找到「展开」，dump 视图文字看结构");
-                dumpTextViews();
+                appendLogView(@"⚠️ 尚未捕获到任务列表，再等 3 秒…");
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (_capturedTaskList && _capturedTaskList.count > 0) {
+                        _taskListCache = _capturedTaskList;
+                        appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
+                    } else {
+                        appendLogView(@"❌ 未捕获到任务，请确认等级页「额外活跃」分页已展开");
+                    }
+                    refreshTaskListUI();
+                    if (_floatBall) _floatBall.hidden = NO;
+                    _autoFlowRunning = NO;
+                });
                 return;
             }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (step != 3) return; step = 4;
-                appendLogView(@"④ 任务已展开，自动获取全量任务…");
-                refreshTaskListUI();
-                // 2.5 秒后再查一次捕获结果（客户端请求可能稍晚到）
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (_capturedTaskList && _capturedTaskList.count > 10) {
-                        appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
-                        refreshTaskListUI();
-                    }
-                });
-            });
+            if (_floatBall) _floatBall.hidden = NO;
+            _autoFlowRunning = NO;
         });
     });
 }

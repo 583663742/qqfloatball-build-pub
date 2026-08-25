@@ -227,7 +227,7 @@ static BOOL isLevelKeyURL(NSString *url) {
         // iOS QQ 等级页走 Kuikly / CLM，不走安卓的 levelTask/Get。
         // 只读抓取页面实际返回的任务材料和用户记录；绝不改请求、绝不触发页面动作。
         BOOL isIOSLevelMaterial = [url containsString:@"getInitialTaskMaterial"] || [url containsString:@"GetUserRecord"];
-        if (isIOSLevelMaterial) {
+        if (isIOSLevelMaterial && _dumpAllRequests) {
             void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                 if (data && data.length > 0) {
                     NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
@@ -1432,13 +1432,13 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ QQ等级任务";
+    titleLb.text = @"⚡ iOS等级页抓取";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
 
-    // 标题栏拖动条（整个标题栏区域可拖动面板，任务列表滚动不受影响）
-    UIView *dragBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w - 78, 40)];
+    // 标题栏拖动条：仅覆盖标题区域，不能挡住右侧两个独立操作按钮。
+    UIView *dragBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 40)];
     dragBar.backgroundColor = [UIColor clearColor];
     dragBar.userInteractionEnabled = YES;
     UIPanGestureRecognizer *panelPan = [[UIPanGestureRecognizer alloc] initWithTarget:[UIApplication sharedApplication]
@@ -1447,13 +1447,21 @@ static void showTaskPanel(void) {
     [panel addSubview:dragBar];
     [panel bringSubviewToFront:dragBar];
 
-    // 只读抓取入口：打开 iOS 等级页，记录页面实际请求和响应。
+    // 两个独立操作：先打开页面，再在目标页面手动开始只读抓取。
+    UIButton *openBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    openBtn.frame = CGRectMake(w - 184, 8, 78, 26);
+    [openBtn setTitle:@"🌐 打开等级" forState:UIControlStateNormal];
+    [openBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    openBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    [openBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:openBtn];
+
     UIButton *captureBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    captureBtn.frame = CGRectMake(w - 126, 8, 104, 26);
-    [captureBtn setTitle:@"🌐 打开并抓取" forState:UIControlStateNormal];
-    [captureBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    captureBtn.titleLabel.font = [UIFont systemFontOfSize:12];
-    [captureBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
+    captureBtn.frame = CGRectMake(w - 108, 8, 78, 26);
+    [captureBtn setTitle:@"⏺ 抓取" forState:UIControlStateNormal];
+    [captureBtn setTitleColor:[UIColor systemGreenColor] forState:UIControlStateNormal];
+    captureBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    [captureBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:captureBtn];
 
     // 关闭
@@ -1473,7 +1481,7 @@ static void showTaskPanel(void) {
     tv.font = [UIFont systemFontOfSize:10];
     tv.editable = NO;
     tv.selectable = YES;
-    tv.text = @"iOS 等级页抓取日志：\n点「打开并抓取」后，页面实际请求和响应会原样记录在这里。\n\n";
+    tv.text = @"iOS 等级页抓取日志：\n先点「打开等级」，进入你要观察的页面后再点「抓取」。\n抓取只记录当前页面真实请求和响应，不会自动点击或执行任务。\n\n";
     _logTextView = tv;
     _logView = panel;
     [panel addSubview:tv];
@@ -1640,6 +1648,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskCloseTapped:(UIButton *)sender;
 - (void)_taskExecCheckedTapped:(UIButton *)sender;
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender;
+- (void)_taskCaptureTapped:(UIButton *)sender;
 @end
 
 %hook UIApplication
@@ -1783,31 +1792,33 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
-    // iOS 只读抓取：打开等级页并记录真实请求/响应，不轮询、不点页面、不执行任务。
-    if (_dumpAllRequests) return;
-    qqlog(@"[iOS抓取] 打开等级页，开始 12 秒只读记录");
-    if (_taskPanel) {
-        [_taskPanel removeFromSuperview];
-        _taskPanel = nil;
-        _logView = nil;
-        _logTextView = nil;
-        _taskScroll = nil;
-    }
-
+    // 仅打开页面：不改变抓取状态，不读写页面内容。
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
     NSString *b64 = [bd base64EncodedStringWithOptions:0];
     NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
     NSURL *u = [NSURL URLWithString:deep];
     if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
-        qqlog(@"[iOS抓取] 无法拉起等级页深链");
+        appendLogView(@"[iOS抓取] 无法拉起等级页深链");
+        return;
+    }
+    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+}
+
+%new
+- (void)_taskCaptureTapped:(UIButton *)sender {
+    // 仅抓取当前页面的真实网络流量，20 秒后自动停止。
+    if (_dumpAllRequests) {
+        appendLogView(@"[iOS抓取] 正在记录中，请等待当前窗口结束");
         return;
     }
     _dumpAllRequests = YES;
-    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    appendLogView(@"[iOS抓取] 开始 20 秒只读记录");
+    qqlog(@"[iOS抓取] 开始 20 秒只读记录（当前页面）");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         _dumpAllRequests = NO;
-        qqlog(@"[iOS抓取] 12 秒记录窗口结束");
+        appendLogView(@"[iOS抓取] 20 秒记录窗口结束");
+        qqlog(@"[iOS抓取] 20 秒记录窗口结束");
     });
 }
 

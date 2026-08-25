@@ -502,6 +502,64 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
     return %orig;
 }
 
+// v1.2.19：等级页任务请求实走 HTTP 桥（kuiklysso.vip.qq.com/sso-0x95a8），
+// 回包走 handleHTTPResponse，不走 handleSSOResponse —— 补上整条 HTTP 链路
+- (id)requestByHTTP:(id)request completion:(id)completion {
+    @try {
+        if (_dumpAllRequests && request) {
+            NSString *cmd = [request respondsToSelector:@selector(cmd)] ? [request valueForKey:@"cmd"] : nil;
+            NSString *uid = [request respondsToSelector:@selector(uniqueId)] ? [request valueForKey:@"uniqueId"] : nil;
+            NSString *url = [request respondsToSelector:@selector(url)] ? [request valueForKey:@"url"] : nil;
+            qqlog(@"[HTTP-REQ] cmd=%@ uniqueId=%@ url=%@", cmd ?: @"?", uid ?: @"?", url ?: @"?");
+        }
+    } @catch (NSException *e) {}
+    return %orig;
+}
+
+- (void)performHTTPRequest:(id)arg1 body:(id)body pskey:(id)pskey completion:(id)completion {
+    @try {
+        if (_dumpAllRequests) {
+            NSString *url = [arg1 isKindOfClass:[NSString class]] ? arg1 : [NSString stringWithFormat:@"%@", arg1 ?: @"?"];
+            NSData *bd = [body isKindOfClass:[NSData class]] ? body : nil;
+            NSString *bodyStr = bd ? qqfbHex(bd, 1500) : ([body isKindOfClass:[NSString class]] ? body : [NSString stringWithFormat:@"%@", body ?: @""]);
+            qqlog(@"[HTTP-SEND] url=%@ pskey=%d body=%@", url, (int)([pskey length]), bodyStr);
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (void)handleHTTPResponse:(id)response result:(id)result error:(id)error {
+    @try {
+        if (_dumpAllRequests) {
+            NSString *respDesc = @"";
+            if ([result isKindOfClass:[NSData class]]) {
+                respDesc = qqfbHex(result, 2000);
+            } else if (result) {
+                respDesc = [NSString stringWithFormat:@"%@", result];
+                if (respDesc.length > 1500) respDesc = [respDesc substringToIndex:1500];
+            }
+            qqlog(@"[HTTP-RSP] result=%@ err=%@", respDesc ?: @"?", error ?: @"nil");
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (void)saveResponseData:(id)response rspData:(id)rspData {
+    @try {
+        if (_dumpAllRequests) {
+            NSString *d = @"";
+            if ([rspData isKindOfClass:[NSData class]]) {
+                d = qqfbHex(rspData, 2000);
+            } else if (rspData) {
+                d = [NSString stringWithFormat:@"%@", rspData];
+                if (d.length > 1500) d = [d substringToIndex:1500];
+            }
+            qqlog(@"[HTTP-SAVE] rspData=%@", d ?: @"?");
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
 - (void)handleSSOResponse:(id)response result:(id)result {
     @try {
         if (_dumpAllRequests) {

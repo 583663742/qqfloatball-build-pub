@@ -466,7 +466,7 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
     %orig;
 }
 
-- (void)onDispatchRequestReply:(long long)arg1 cmd:(int)arg2 pbBuffer:(id)arg3 {
+- (void)onDispatchRequestReply:(long long)arg1 cmd:(int)arg2 pbBuffer:(id)pbBuffer {
     @try {
         if (_dumpAllRequests) {
             NSData *pb = [pbBuffer isKindOfClass:[NSData class]] ? pbBuffer : nil;

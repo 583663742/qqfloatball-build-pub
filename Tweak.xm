@@ -645,7 +645,7 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
                     if ([arg1 isKindOfClass:[NSDictionary class]]) cb = [(NSDictionary *)arg1 objectForKey:@"callback"];
                     if (cb) {
                         @try {
-                            const char *sig = _Block_signature(cb);
+                            const char *sig = _Block_signature((__bridge const void *)cb);
                             qqlog(@"[KUILKY-PB-CB] callback=%@ sig=%s", cb, sig ?: "(nil)");
                         } @catch (NSException *e2) {
                             qqlog(@"[KUILKY-PB-CB] 探测异常 %@", e2);

@@ -4,6 +4,16 @@
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
 
+// v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
+// 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
+#ifdef __cplusplus
+extern "C" {
+#endif
+const char *_Block_signature(const void *aBlock);
+#ifdef __cplusplus
+}
+#endif
+
 // ── QQ 9.3.35 顶层悬浮窗管理器私有接口（头文件 032238 实锤）──
 //    声明后编译器认识这些 selector（ObjC++ 下向 id 调未声明 selector 会报 error）
 @interface QQFloatingWindowTopLevelWindowManager : NSObject
@@ -104,12 +114,42 @@ static BOOL isLevelKeyURL(NSString *url) {
     dispatch_once(&once, ^{
         kws = @[@"qqlevel", @"tianxuan", @"commdeliver", @"levelTask", @"ExecAct",
                 @"GetUserRecord", @"openKuikly", @"benefit", @"GetBenefitsDetail",
-                @"GetUserItemsByBenefits", @"aggregation", @"GetTotalReadTime", @"GetShow"];
+                @"GetUserItemsByBenefits", @"aggregation", @"GetTotalReadTime", @"GetShow",
+                // v1.2.22: 等级页真实数据域（实测 2026-08-25 实机抓包）
+                @"club.vip.qq.com", @"h5.vip.qq.com", @"getInitialTaskMaterial",
+                @"GetScore", @"GetAds", @"getMedalUrl", @"clm-logic", @"vip_score_server",
+                @"GetUserRecord", @"kuiklysso", @"gotrpc"];
     });
     for (NSString *kw in kws) {
         if ([url containsString:kw]) return YES;
     }
     return NO;
+}
+
+// ── v1.2.22: 抓包自动停止 —— 抓到关键响应后 8 秒无新数据自动停（不再固定 30 秒）──
+static BOOL _autoStopScheduled = NO;
+static void qqfbScheduleAutoStop(void) {
+    // 每次关键响应到达时重置 8 秒窗口；窗口内无新响应则自动停
+    static dispatch_source_t timer = NULL;
+    dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0);
+    if (timer) dispatch_source_cancel(timer);
+    timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                              DISPATCH_TIME_FOREVER, 1.0);
+    dispatch_source_set_event_handler(timer, ^{
+        if (_dumpAllRequests) {
+            _dumpAllRequests = NO;
+            _autoStopScheduled = NO;
+            qqlog(@"[iOS抓取] 8 秒无新响应，自动停止抓包");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                appendLogView(@"[iOS抓取] 自动停止");
+            });
+        }
+        dispatch_source_cancel(timer);
+        timer = NULL;
+    });
+    _autoStopScheduled = YES;
+    dispatch_resume(timer);
 }
 
 // ── 提前声明 %new 方法，供 dispatch_once block 内调用 ──
@@ -226,19 +266,23 @@ static BOOL isLevelKeyURL(NSString *url) {
         }
         // iOS QQ 等级页走 Kuikly / CLM，不走安卓的 levelTask/Get。
         // 只读抓取页面实际返回的任务材料和用户记录；绝不改请求、绝不触发页面动作。
-        BOOL isIOSLevelMaterial = [url containsString:@"getInitialTaskMaterial"] || [url containsString:@"GetUserRecord"];
+        // v1.2.22: 覆盖全部等级域（club.vip.qq.com / h5.vip.qq.com / gotrpc 等），
+        //          响应抓全 + 每次响应重置 8 秒自动停止计时器
+        BOOL isIOSLevelMaterial = isLevelKeyURL(url);
         if (isIOSLevelMaterial && _dumpAllRequests) {
             void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                 if (data && data.length > 0) {
                     NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
                     if (responseText.length > 0) {
-                        qqlog(@"[iOS等级页响应] %@\n%@", url, responseText);
+                        qqlog(@"[iOS等级页响应] %@\n%@", url, responseText.length > 6000 ? [responseText substringToIndex:6000] : responseText);
                     } else {
                         qqlog(@"[iOS等级页响应] %@ (非UTF-8, %lu bytes)", url, (unsigned long)data.length);
                     }
                 } else {
                     qqlog(@"[iOS等级页响应] %@ (empty, err=%@)", url, err);
                 }
+                // 响应到达 → 重置自动停止窗口
+                if (_dumpAllRequests) qqfbScheduleAutoStop();
                 if (completionHandler) completionHandler(data, resp, err);
             };
             return %orig(request, wrapped);
@@ -576,20 +620,41 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
 // 响应改由下方 RohanaSwiftHook / AIRequestModule 签名确定的方法捕获
 %hook QQKuiklyPlatformApi
 
+// v1.2.22: 完整记录请求（cmd + pb body hex + callback block 签名探测）
+// 用 _Block_signature 只读探测 block 真实签名，不猜不调用（v1.2.20 闪退教训）
 - (void)sendPbRequest:(id)arg1 {
     @try {
         if (_dumpAllRequests && arg1) {
             NSString *desc = [NSString stringWithFormat:@"%@", arg1];
             qqlog(@"[KUILKY-PB] %@", desc.length > 800 ? [desc substringToIndex:800] : desc);
-            // 尝试从参数容器里安全提取 param 数组（不包装，纯读取）
             @try {
                 id params = nil;
                 if ([arg1 isKindOfClass:[NSDictionary class]]) params = [(NSDictionary *)arg1 objectForKey:@"param"];
                 if ([arg1 respondsToSelector:@selector(objectForKey:)]) params = [arg1 objectForKey:@"param"];
                 if ([params isKindOfClass:[NSArray class]] && [(NSArray *)params count] > 0) {
-                    qqlog(@"[KUILKY-PB-REQ] cmd=%@ paramCount=%lu", params[0], (unsigned long)[(NSArray *)params count]);
+                    NSArray *pa = params;
+                    NSString *cmd = pa[0];
+                    // param[1] 是 protobuf body（NSData），完整 hex 记录
+                    NSData *pbBody = ([pa count] > 1 && [pa[1] isKindOfClass:[NSData class]]) ? pa[1] : nil;
+                    qqlog(@"[KUILKY-PB-REQ] cmd=%@ paramCount=%lu bodyLen=%lu bodyHex=%@",
+                          cmd, (unsigned long)[pa count],
+                          (unsigned long)pbBody.length,
+                          pbBody ? qqfbHex(pbBody, 8000) : @"nil");
+                    // 响应 callback 探测：block 真实签名（只读，零风险）
+                    id cb = nil;
+                    if ([arg1 isKindOfClass:[NSDictionary class]]) cb = [(NSDictionary *)arg1 objectForKey:@"callback"];
+                    if (cb) {
+                        @try {
+                            const char *sig = _Block_signature(cb);
+                            qqlog(@"[KUILKY-PB-CB] callback=%@ sig=%s", cb, sig ?: "(nil)");
+                        } @catch (NSException *e2) {
+                            qqlog(@"[KUILKY-PB-CB] 探测异常 %@", e2);
+                        }
+                    }
                 }
             } @catch (NSException *e) {}
+            // 响应未直接绑定，靠自动停止窗口兜底
+            if (_dumpAllRequests) qqfbScheduleAutoStop();
         }
     } @catch (NSException *e) {}
     %orig;
@@ -2063,6 +2128,8 @@ __attribute__((unused)) static void showLogPanel(void) {
     _dumpAllRequests = YES;
     appendLogView(@"[iOS抓取] 已开启，准备打开等级页…");
     qqlog(@"[iOS抓取] 先开抓包，再打开等级页");
+    // v1.2.22: 打开等级页即启动自动停止窗口（响应到达自动续期，8 秒无新数据自动停）
+    qqfbScheduleAutoStop();
 
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
@@ -2076,30 +2143,21 @@ __attribute__((unused)) static void showLogPanel(void) {
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-        appendLogView(@"[iOS抓取] 等级页已打开，30 秒内记录初始化与页面请求");
-        qqlog(@"[iOS抓取] 等级页已打开，30 秒抓包窗口开始");
-    });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        _dumpAllRequests = NO;
-        appendLogView(@"[iOS抓取] 30 秒记录窗口结束");
-        qqlog(@"[iOS抓取] 30 秒记录窗口结束");
+        appendLogView(@"[iOS抓取] 等级页已打开，响应到达后自动停止");
+        qqlog(@"[iOS抓取] 等级页已打开，抓包窗口（响应驱动自动停止）");
     });
 }
 %new
 - (void)_taskCaptureTapped:(UIButton *)sender {
-    // 仅抓取当前页面的真实网络流量，20 秒后自动停止。
+    // 仅抓取当前页面的真实网络流量，响应到达后自动停止（v1.2.22）。
     if (_dumpAllRequests) {
         appendLogView(@"[iOS抓取] 正在记录中，请等待当前窗口结束");
         return;
     }
     _dumpAllRequests = YES;
-    appendLogView(@"[iOS抓取] 开始 20 秒只读记录");
-    qqlog(@"[iOS抓取] 开始 20 秒只读记录（当前页面）");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        _dumpAllRequests = NO;
-        appendLogView(@"[iOS抓取] 20 秒记录窗口结束");
-        qqlog(@"[iOS抓取] 20 秒记录窗口结束");
-    });
+    appendLogView(@"[iOS抓取] 开始只读记录（响应驱动自动停止）");
+    qqlog(@"[iOS抓取] 开始只读记录（响应驱动自动停止）");
+    qqfbScheduleAutoStop();
 }
 
 %new

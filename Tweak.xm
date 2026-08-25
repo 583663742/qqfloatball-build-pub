@@ -576,12 +576,40 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
 
 - (void)sendPbRequest:(id)arg1 {
     @try {
-        if (_dumpAllRequests && arg1) {
+        if (_dumpAllRequests && [arg1 isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *payload = (NSDictionary *)arg1;
+            id params = payload[@"param"];
             NSString *desc = [NSString stringWithFormat:@"%@", arg1];
             qqlog(@"[KUILKY-PB] %@", desc.length > 800 ? [desc substringToIndex:800] : desc);
+            if ([params isKindOfClass:[NSArray class]]) {
+                id cmd = [(NSArray *)params count] > 0 ? params[0] : nil;
+                qqlog(@"[KUILKY-PB-REQ] cmd=%@ paramCount=%lu", cmd ?: @"?", (unsigned long)[(NSArray *)params count]);
+            }
+
+            // Kuikly 的任务回包通过 payload.callback block 返回；保留原参数，
+            // 只在回调入口记录结果，再原样转交给 QQ。
+            id callback = payload[@"callback"];
+            if (callback) {
+                void (^original)(id, id, id, int, id) = [callback copy];
+                NSMutableDictionary *wrapped = [payload mutableCopy];
+                NSArray *requestParams = [params isKindOfClass:[NSArray class]] ? [params copy] : nil;
+                wrapped[@"callback"] = ^(id cmd, id response, id traceId, int resultCode, id extra) {
+                    @try {
+                        if (_dumpAllRequests) {
+                            NSString *cmdDesc = cmd ? [NSString stringWithFormat:@"%@", cmd] : (requestParams.count > 0 ? [NSString stringWithFormat:@"%@", requestParams[0]] : @"?");
+                            NSString *out = response ? [NSString stringWithFormat:@"%@", response] : @"nil";
+                            if (out.length > 3000) out = [out substringToIndex:3000];
+                            qqlog(@"[KUILKY-PB-RSP] cmd=%@ code=%d trace=%@ result=%@ extra=%@", cmdDesc, resultCode, traceId ?: @"", out, extra ?: @"");
+                            if ([response isKindOfClass:[NSData class]]) qqlog(@"[KUILKY-PB-RSP-HEX] %@", qqfbHex(response, 4000));
+                        }
+                    } @catch (NSException *e) {}
+                    original(cmd, response, traceId, resultCode, extra);
+                };
+                arg1 = wrapped;
+            }
         }
     } @catch (NSException *e) {}
-    %orig;
+    %orig(arg1);
 }
 
 %end

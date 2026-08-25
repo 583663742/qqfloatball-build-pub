@@ -1,0 +1,34 @@
+﻿2026-08-24T15:39:48.7155710Z ##[group]Run git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
+2026-08-24T15:39:48.7156510Z [36;1mgit clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"[0m
+2026-08-24T15:39:48.7215570Z shell: /bin/bash -e {0}
+2026-08-24T15:39:48.7215880Z env:
+2026-08-24T15:39:48.7216240Z   THEOS: /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos
+2026-08-24T15:39:48.7216650Z ##[endgroup]
+2026-08-24T15:39:48.7467520Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos'...
+2026-08-24T15:39:50.0798300Z Submodule 'vendor/dm.pl' (https://github.com/theos/dm.pl.git) registered for path 'vendor/dm.pl'
+2026-08-24T15:39:50.0799340Z Submodule 'vendor/include' (https://github.com/roothide/headers.git) registered for path 'vendor/include'
+2026-08-24T15:39:50.0801860Z Submodule 'vendor/lib' (https://github.com/roothide/lib.git) registered for path 'vendor/lib'
+2026-08-24T15:39:50.0806470Z Submodule 'vendor/logos' (https://github.com/theos/logos.git) registered for path 'vendor/logos'
+2026-08-24T15:39:50.0807330Z Submodule 'vendor/nic' (https://github.com/theos/nic.git) registered for path 'vendor/nic'
+2026-08-24T15:39:50.0809710Z Submodule 'vendor/orion' (https://github.com/theos/orion.git) registered for path 'vendor/orion'
+2026-08-24T15:39:50.0823520Z Submodule 'vendor/swift-support' (https://github.com/theos/swift-support.git) registered for path 'vendor/swift-support'
+2026-08-24T15:39:50.0824470Z Submodule 'vendor/templates' (https://github.com/theos/templates.git) registered for path 'vendor/templates'
+2026-08-24T15:39:50.0889680Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/dm.pl'...
+2026-08-24T15:39:50.6975840Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/include'...
+2026-08-24T15:39:51.3688550Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/lib'...
+2026-08-24T15:39:52.0393710Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/logos'...
+2026-08-24T15:39:52.8755690Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/nic'...
+2026-08-24T15:39:53.5516870Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/orion'...
+2026-08-24T15:39:54.2101800Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/swift-support'...
+2026-08-24T15:39:55.0117680Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/templates'...
+2026-08-24T15:39:55.6368240Z Submodule path 'vendor/dm.pl': checked out 'd9a3b72e274226dd2823c0a7c1d6d05099f4f51c'
+2026-08-24T15:39:55.7173450Z Submodule path 'vendor/include': checked out 'ac1c4fd21214548d6d308fcb835d30df1e43953d'
+2026-08-24T15:39:55.7776110Z Submodule path 'vendor/lib': checked out '85e9b5b8aff11bbefc59525c64c8f55149926e56'
+2026-08-24T15:39:55.8183310Z Submodule path 'vendor/logos': checked out 'a62370066a97e36d59b200a9fa10c5091f5e8972'
+2026-08-24T15:39:55.8484160Z Submodule path 'vendor/nic': checked out '4e7adcbeac2e4636b91e2f76341adfe4c4d0ceec'
+2026-08-24T15:39:55.8886610Z Submodule path 'vendor/orion': checked out 'c0ed879ecaae16f3c8d06a6c36302f6c78d1f7e4'
+2026-08-24T15:39:55.8988270Z Submodule 'fishhook' (https://github.com/facebook/fishhook.git) registered for path 'vendor/orion/fishhook'
+2026-08-24T15:39:55.9054910Z Cloning into '/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos/vendor/orion/fishhook'...
+2026-08-24T15:39:56.5026970Z Submodule path 'vendor/orion/fishhook': checked out 'aadc161ac3b80db07a9908851839a17ba63a9eb1'
+2026-08-24T15:39:56.5229730Z Submodule path 'vendor/swift-support': checked out '4cf59ff04cdb2ceb27ea2228753e0497297b6182'
+2026-08-24T15:39:56.5790750Z Submodule path 'vendor/templates': checked out '6c3944e281c4726f1383755d0fbb642840312d28'

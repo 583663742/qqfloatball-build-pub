@@ -1,0 +1,39 @@
+﻿2026-08-24T15:39:58.9992160Z ##[group]Run brew install ldid || brew install --build-from-source ldid || (mkdir -p "$THEOS/bin" && curl -L -o "$THEOS/bin/ldid" https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 && chmod +x "$THEOS/bin/ldid" && echo "$THEOS/bin" >> $GITHUB_PATH)
+2026-08-24T15:39:58.9993790Z [36;1mbrew install ldid || brew install --build-from-source ldid || (mkdir -p "$THEOS/bin" && curl -L -o "$THEOS/bin/ldid" https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 && chmod +x "$THEOS/bin/ldid" && echo "$THEOS/bin" >> $GITHUB_PATH)[0m
+2026-08-24T15:39:59.0040390Z shell: /bin/bash -e {0}
+2026-08-24T15:39:59.0040630Z env:
+2026-08-24T15:39:59.0040920Z   THEOS: /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos
+2026-08-24T15:39:59.0041270Z ##[endgroup]
+2026-08-24T15:40:00.8253890Z ##[warning]The following taps are not trusted:
+  aws/tap
+
+Homebrew is currently ignoring formulae, casks and commands from these taps because tap trust is required.
+Untap them with:
+  brew untap aws/tap
+Trust specific formulae, casks and commands with:
+  brew trust --formula <user>/<tap>/<formula>
+  brew trust --cask <user>/<tap>/<cask>
+  brew trust --command <user>/<tap>/<command>
+Whole-tap trust is broader and includes all current and future formulae,
+casks and commands from the listed taps. Trust whole taps with:
+  brew trust aws/tap
+To disable trust checks:
+  export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
+This is not recommended and will be removed in a later release.
+For more information, see:
+  https://docs.brew.sh/Tap-Trust
+
+2026-08-24T15:40:01.3556120Z [34m==>[0m [1mWould install 1 formula:[0m
+2026-08-24T15:40:01.3657390Z ldid
+2026-08-24T15:40:01.3758670Z [34m==>[0m [1mDownloading https://ghcr.io/v2/homebrew/core/ldid/manifests/2.1.5_1-1[0m
+2026-08-24T15:40:01.6715760Z [34m==>[0m [1mWould install 1 dependency for ldid:[0m
+2026-08-24T15:40:01.6716260Z libplist
+2026-08-24T15:40:01.6718360Z [32m==>[0m [1mFetching downloads for: [32mldid[39m[0m
+2026-08-24T15:40:01.9751700Z ✔︎ Bottle Manifest libplist (2.7.0)
+2026-08-24T15:40:02.0420680Z ✔︎ Bottle libplist (2.7.0)
+2026-08-24T15:40:02.0434100Z ✔︎ Bottle ldid (2.1.5_1)
+2026-08-24T15:40:02.1882060Z [32m==>[0m [1mInstalling ldid dependency: [32mlibplist[39m[0m
+2026-08-24T15:40:02.1944800Z [34m==>[0m [1mPouring libplist--2.7.0.arm64_sonoma.bottle.tar.gz[0m
+2026-08-24T15:40:02.3331570Z 🍺  /opt/homebrew/Cellar/libplist/2.7.0: 32 files, 660.7KB
+2026-08-24T15:40:02.3336220Z [34m==>[0m [1mPouring ldid--2.1.5_1.arm64_sonoma.bottle.1.tar.gz[0m
+2026-08-24T15:40:02.3849240Z 🍺  /opt/homebrew/Cellar/ldid/2.1.5_1: 6 files, 288KB

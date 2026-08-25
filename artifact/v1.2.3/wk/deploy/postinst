@@ -1,0 +1,16 @@
+#!/bin/bash
+# QQFloatBall postinst — 装机后自动建 roothidepatch 软链（防闪退根源修复 2026-08-20）
+# 软链必须指向 /usr/lib/DynamicPatches/AutoPatches.dylib，指向自身 = ellekit 注入异常 = QQ 启动闪退
+DYLIB_NAME="QQFloatBall"
+DYLIB="${DYLIB_NAME}.dylib"
+
+# TweakInject 与 DynamicLibraries 两处都建（dpkg-fill 同步后生效）
+for DIR in /var/jb/usr/lib/TweakInject /Library/MobileSubstrate/DynamicLibraries; do
+    if [ -d "$DIR" ]; then
+        # 先删旧链接和 .DISABLED 残留
+        rm -f "$DIR/${DYLIB}.roothidepatch" "$DIR/${DYLIB}.DISABLED" "$DIR/${DYLIB}.bak"
+        ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib "$DIR/${DYLIB}.roothidepatch"
+    fi
+done
+
+exit 0

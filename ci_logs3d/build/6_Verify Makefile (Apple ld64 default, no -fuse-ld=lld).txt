@@ -1,0 +1,9 @@
+﻿2026-08-24T14:53:55.7959310Z ##[group]Run grep -n "LDFLAGS" Makefile || true
+2026-08-24T14:53:55.7959650Z [36;1mgrep -n "LDFLAGS" Makefile || true[0m
+2026-08-24T14:53:55.7959980Z [36;1mgrep -n "ARCHS" Makefile || true[0m
+2026-08-24T14:53:55.8007690Z shell: /bin/bash -e {0}
+2026-08-24T14:53:55.8008020Z env:
+2026-08-24T14:53:55.8008310Z   THEOS: /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos
+2026-08-24T14:53:55.8008740Z ##[endgroup]
+2026-08-24T14:53:55.8345170Z 14:QQFloatBall_LDFLAGS = -L"$(THEOS_SDK_PATH)/usr/lib" -framework CydiaSubstrate -F"$(THEOS_VENDOR_LIBRARY_PATH)/iphone/roothide" -lroothide
+2026-08-24T14:53:55.8349130Z 2:export ARCHS = arm64e

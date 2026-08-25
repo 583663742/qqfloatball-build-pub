@@ -1,0 +1,8 @@
+2026-08-24T15:39:43.2410000Z Evaluating build.if
+2026-08-24T15:39:43.2410000Z Evaluating: success()
+2026-08-24T15:39:43.2410000Z Result: true
+2026-08-24T15:39:43.4940000Z Job is about to start running on the hosted runner: GitHub Actions 1000000390
+2026-08-24T15:39:43.4830000Z Requested labels: macos-14
+2026-08-24T15:39:43.4830000Z Job defined at: 583663742/qqfloatball-build-pub/.github/workflows/build.yml@refs/heads/main
+2026-08-24T15:39:43.4830000Z Waiting for a runner to pick up this job...
+2026-08-24T15:39:43.4930000Z Job is waiting for a hosted runner to come online.

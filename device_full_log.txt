@@ -1,0 +1,63 @@
+[捕获] 客户端原生 levelTask/Get → 10 个任务
+[taskList] ret=(null)
+[taskList] 共 10 个任务
+[action] 点球 → 任务面板
+[action] 打开等级页(自动流程 v1.2.4)
+[Kuikly] handleSchemeNotifiction: NSConcreteNotification 0x286148300 {name = KParseUrlSuccessNotification; userInfo = {
+    ExecuteJSDelegate = "<QQWebViewController: 0x17aa5c800>";
+    OpenURLFromType = 0;
+    "bundle_name" = "vas_qqvip_account_info_host";
+    enteranceid = "qqlevel_index";
+    "internal_cmd" = 1111;
+    "is_animated" = false;
+    "kr_turbo_display" = 1;
+    "page_name" = "vas_qqvip_account_info_host";
+    "qqmc_config" = "vas_kuikly_config";
+    "src_type" = web;
+    "trace_detail" = "base64-eyJlbnRlcmFuY2VJZCI6ImNsdWJfaDUifQ==";
+    version = 1;
+}}
+[KuiklyView] init pageName=https://vfiles.gtimg.cn/wuji_dashboard/xy/componenthub/LlMKmGmv.js?_rij_violaUrl=1&hideNav=1&v_nav_immer=1&nv2=2&v_bundleName=vas_qqvip_account_info_host&v_bg_color=f5f5f5&statusColor=1 size={430, 932}
+[KuiklyVC] contentViewDidLoad pageName=https://vfiles.gtimg.cn/wuji_dashboard/xy/componenthub/LlMKmGmv.js?_rij_violaUrl=1&hideNav=1&v_nav_immer=1&nv2=2&v_bundleName=vas_qqvip_account_info_host&v_bg_color=f5f5f5&statusColor=1 view=<KuiklyRenderView: 0x16a9ecf90; frame = (0 0; 430 932); layer = <CALayer: 0x28606af00>>
+[KuiklyVC] viewDidAppear pageName=https://vfiles.gtimg.cn/wuji_dashboard/xy/componenthub/LlMKmGmv.js?_rij_violaUrl=1&hideNav=1&v_nav_immer=1&nv2=2&v_bundleName=vas_qqvip_account_info_host&v_bg_color=f5f5f5&statusColor=1
+[KuiklyView] viewDidAppear pageName=https://vfiles.gtimg.cn/wuji_dashboard/xy/componenthub/LlMKmGmv.js?_rij_violaUrl=1&hideNav=1&v_nav_immer=1&nv2=2&v_bundleName=vas_qqvip_account_info_host&v_bg_color=f5f5f5&statusColor=1
+[KRHttp] GET https://club.vip.qq.com/api/medal/getMedalUrl?ADTAG=qqlevel_index&g_tk=1721268177 param={
+}
+[NSURLSession] GET https://club.vip.qq.com/api/medal/getMedalUrl?ADTAG=qqlevel_index&g_tk=1721268177 body=
+[KRHttp] POST https://club.vip.qq.com/mono/api/trpc/trpc/tianxuan/commdeliver/service/GetUserRecord?ADTAG=qqlevel_index&g_tk=1721268177 param={
+    data =     {
+        businessType = 1;
+        num = 10;
+        startIndex = 0;
+        userRecordKey = "21182_2a1ebfc1";
+    };
+}
+[KRHttp] POST https://h5.vip.qq.com/http2rpc/gotrpc/TianShu.Access/GetAds?ADTAG=qqlevel_index&pos_id=500&g_tk=1721268177 param={
+    lstPos =     (
+                {
+            nNeedCnt = 20;
+            posId = 500;
+        }
+    );
+    stComminfo =     {
+        lUin = 583663742;
+        mode = 1;
+        strApp = sq;
+        strOs = ios;
+        strQua = "V1_IPH_SQ_9.3.35_1_APP_A";
+        strVersion = "9.3.35";
+    };
+}
+[捕获] GetUserRecord 响应: {"prizeList":[{"prizeValue":{"type":349,"value":""},"prizeDesc":{"id":"2bac1e73","name":"天神降临头像挂件","desc":"天神降临头像挂件","picUrl":"","prizeUrl":"","customData":"{\"sub_app\":88,\"act_id\":\"21182_2a1ebfc1\",\"rule_id\":\"118344_c3970767\",\"rule_name\":\"天神降临头像挂件【任务福利】\",\"is_paid\":false,\"pay_amount\":0,\"packet_custom_data\":\"{\\\"jump_url\\\": \\\"https://h5.qzone.qq.com/avatarDress/index/mine\\\",\\\"no_share\\\": \\\"1\\\",\\\"btn_str\\\": \\\"前往领取查看\\\",\\\"btn_text_color\\\": \\\"#ffffff\\\",\\\"btn_bg_color\\\": \\\"#0099FF\\\",\\\"btn_active_bg_color\\\": \\\"#008AE5\\\",\\\"prize_pic_v2\\\": \\\"http://down.qq.com/qqweb/tianfuxianglintx.png\\\",\\\"taken_title\\\":\\\"福利已领取\\\",\\\"taken_desc\\\":\\\"你已获得天神降临头像挂件7天体验，奖励已到账，可前往查看！。\\\",\\\"prize_type\\\": 2,\\\"title\\\":\\\"恭喜获奖\\\",\\\"desc\\\":\\\"恭喜获得天神降临头像挂件7天体验，奖励已到账，可前往查看！\\\"}\"}","btnText":"","prizeLogo":""},"num":1,"time":1751867404},{"prizeValue":{"type":349,"value":""},"prizeDesc":{"id":"9cc3b35c","name":"圣洁天使头像挂件","desc":"圣洁天使头像挂件","picUrl":"","prizeUrl":"","customData":"{\"sub_app\":88,\"act_id\":\"21182_2a1ebfc1\",\"rule_id\":\"120354_e41a0799\",\"rule_name\":\"圣洁天使头像挂件【任务福利】\",\"is_paid\":false,\"pay_amount\":0,\"packet_custom_data\":\"{\\\"jump_url\\\": \\\"https://h5.qzone.qq.com/avatarDress/index/mine\\\",\\\"no_share\\\": \\\"1\\\",\\\"btn_str\\\": \\\"前往领取查看\\\",\\\"btn_text_color\\\": \\\"#ffffff\\\",\\\"btn_bg_color\\\": \\\"#0099FF\\\",\\\"btn_active_bg_color\\\": \\\"#008AE5\\\",\\\"prize_pic_v
+[action] 点球 → 任务面板
+[UI自动化] 点击「额外活跃」 tab
+[UI自动化] tap 异常 [<UIGestureRecognizerTarget 0x286785600> valueForUndefinedKey:]: this class is not key value coding-compliant for the key _action.
+[KRHttp] POST https://club.vip.qq.com/mono/api/trpc/qqva/vip_score_server/vip_score_server/VipScoreServer/GetScore?ADTAG=qqlevel_index&g_tk=1721268177 param={
+    data =     {
+    };
+    opt =     {
+    };
+}
+[NSURLSession] POST https://club.vip.qq.com/mono/api/trpc/qqva/vip_score_server/vip_score_server/VipScoreServer/GetScore?ADTAG=qqlevel_index&g_tk=1721268177 body={"opt":{},"data":{}}
+[UI自动化] 点击「展开」
+[UI自动化] tap 异常 [<UIGestureRecognizerTarget 0x28677aba0> valueForUndefinedKey:]: this class is not key value coding-compliant for the key _action.

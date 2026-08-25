@@ -1,0 +1,44 @@
+﻿2026-08-24T14:53:55.8380430Z ##[group]Run export THEOS_PACKAGE_SCHEME=roothide
+2026-08-24T14:53:55.8380880Z [36;1mexport THEOS_PACKAGE_SCHEME=roothide[0m
+2026-08-24T14:53:55.8381160Z [36;1mmake clean[0m
+2026-08-24T14:53:55.8381390Z [36;1mmake package FINALPACKAGE=1[0m
+2026-08-24T14:53:55.8426780Z shell: /bin/bash -e {0}
+2026-08-24T14:53:55.8427020Z env:
+2026-08-24T14:53:55.8427420Z   THEOS: /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos
+2026-08-24T14:53:55.8427790Z ##[endgroup]
+2026-08-24T14:53:59.9294990Z [0;36m==> [1;39mCleaning…[m
+2026-08-24T14:54:00.5974940Z [0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+2026-08-24T14:54:00.7628120Z [1;31m> [1;3;39mMaking all for tweak QQFloatBall…[m
+2026-08-24T14:54:02.9313070Z [0;31m==> [1;39mPreprocessing Tweak.xm…[m
+2026-08-24T14:54:03.0528900Z [0;32m==> [1;39mCompiling Tweak.xm (arm64e)…[m
+2026-08-24T14:54:04.7781290Z [1mTweak.xm:2211:66: [0m[0;1;31merror: [0m[1mreceiver type 'KuiklyRenderViewControllerDelegator' for instance message is a forward declaration[0m
+2026-08-24T14:54:04.7826100Z     qqlog(@"[KuiklyVC] contentViewDidLoad pageName=%@ view=%@", [self valueForKey:@"pageName"], arg1);
+2026-08-24T14:54:04.7829160Z [0;1;32m                                                                 ^~~~
+2026-08-24T14:54:04.7829770Z [0m[1mTweak.xm:134:30: [0m[0;1;30mnote: [0mforward declaration of class here[0m
+2026-08-24T14:54:04.7830660Z @class UIApplication; @class KuiklyRenderViewControllerDelegator; @class QQKuiklyService; @class KRHttpRequestTool; @class NSURLSession; @class QQCRHttpRequest; @class KuiklyRenderView; 
+2026-08-24T14:54:04.7831430Z [0;1;32m                             ^
+2026-08-24T14:54:04.7832130Z [0m[1mTweak.xm:2215:53: [0m[0;1;31merror: [0m[1mreceiver type 'KuiklyRenderViewControllerDelegator' for instance message is a forward declaration[0m
+2026-08-24T14:54:04.7832890Z     qqlog(@"[KuiklyVC] viewDidAppear pageName=%@", [self valueForKey:@"pageName"]);
+2026-08-24T14:54:04.7833480Z [0;1;32m                                                    ^~~~
+2026-08-24T14:54:04.7833990Z [0m[1mTweak.xm:134:30: [0m[0;1;30mnote: [0mforward declaration of class here[0m
+2026-08-24T14:54:04.7834830Z @class UIApplication; @class KuiklyRenderViewControllerDelegator; @class QQKuiklyService; @class KRHttpRequestTool; @class NSURLSession; @class QQCRHttpRequest; @class KuiklyRenderView; 
+2026-08-24T14:54:04.7835620Z [0;1;32m                             ^
+2026-08-24T14:54:04.7836380Z [0m[1mTweak.xm:2223:54: [0m[0;1;31merror: [0m[1mreceiver type 'KuiklyRenderView' for instance message is a forward declaration[0m
+2026-08-24T14:54:04.7837170Z     qqlog(@"[KuiklyView] init pageName=%@ size=%@", [self valueForKey:@"pageName"], NSStringFromCGSize(arg1));
+2026-08-24T14:54:04.7837880Z [0;1;32m                                                     ^~~~
+2026-08-24T14:54:04.7838510Z [0m[1mTweak.xm:134:169: [0m[0;1;30mnote: [0mforward declaration of class here[0m
+2026-08-24T14:54:04.7839450Z @class UIApplication; @class KuiklyRenderViewControllerDelegator; @class QQKuiklyService; @class KRHttpRequestTool; @class NSURLSession; @class QQCRHttpRequest; @class KuiklyRenderView; 
+2026-08-24T14:54:04.7840490Z [0;1;32m                                                                                                                                                                        ^
+2026-08-24T14:54:04.7841250Z [0m[1mTweak.xm:2227:55: [0m[0;1;31merror: [0m[1mreceiver type 'KuiklyRenderView' for instance message is a forward declaration[0m
+2026-08-24T14:54:04.7841910Z     qqlog(@"[KuiklyView] viewDidAppear pageName=%@", [self valueForKey:@"pageName"]);
+2026-08-24T14:54:04.7842420Z [0;1;32m                                                      ^~~~
+2026-08-24T14:54:04.7843720Z [0m[1mTweak.xm:134:169: [0m[0;1;30mnote: [0mforward declaration of class here[0m
+2026-08-24T14:54:04.7844640Z @class UIApplication; @class KuiklyRenderViewControllerDelegator; @class QQKuiklyService; @class KRHttpRequestTool; @class NSURLSession; @class QQCRHttpRequest; @class KuiklyRenderView; 
+2026-08-24T14:54:04.7846020Z [0;1;32m                                                                                                                                                                        ^
+2026-08-24T14:54:04.8064970Z [0m4 errors generated.
+2026-08-24T14:54:04.8117270Z make[3]: *** [/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/.theos/obj/arm64e/Tweak.xm.43c45303.o] Error 1
+2026-08-24T14:54:04.8117990Z rm /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/.theos/obj/arm64e/Tweak.xm.mm
+2026-08-24T14:54:04.8121960Z make[2]: *** [/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/.theos/obj/arm64e/QQFloatBall.dylib] Error 2
+2026-08-24T14:54:04.8122780Z make[1]: *** [internal-library-all_] Error 2
+2026-08-24T14:54:04.8123250Z make: *** [QQFloatBall.all.tweak.variables] Error 2
+2026-08-24T14:54:04.8127700Z ##[error]Process completed with exit code 2.

@@ -1,0 +1,7 @@
+﻿2026-08-24T14:53:49.2708950Z ##[group]Run mkdir -p "$THEOS/sdks"
+2026-08-24T14:53:49.2709220Z [36;1mmkdir -p "$THEOS/sdks"[0m
+2026-08-24T14:53:49.2709490Z [36;1mtar -xJf sdk/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"[0m
+2026-08-24T14:53:49.2758520Z shell: /bin/bash -e {0}
+2026-08-24T14:53:49.2758720Z env:
+2026-08-24T14:53:49.2759000Z   THEOS: /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos
+2026-08-24T14:53:49.2759320Z ##[endgroup]

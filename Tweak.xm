@@ -404,6 +404,130 @@ static BOOL isLevelKeyURL(NSString *url) {
 }
 
 %end
+
+// ──────────────────────────────────────────
+//  SSO/protobuf 层抓取（v1.2.18，依据 QQ 9.3.35 头文件实锤）：
+//  等级页任务数据走 Kuikly SSO protobuf（trpc.metaverse.common.* 系列，
+//  头文件 104742_trpc_metaverse_common_TaskInfo / 104980_QuestInfo 等），
+//  NSURLSession/KRHttp 层看不到正文。回包汇聚在 NT wrapper 的
+//  onSendSSOReply/onSendOidbReply（rspInfo=OCMsfRspInfo 含 pbBuffer），
+//  本层只读记录 cmd+pb，绝不拦截/修改任何请求与响应。
+// ──────────────────────────────────────────
+
+__attribute__((unused)) static NSString *qqfbHex(NSData *data, NSUInteger maxLen) {
+    if (!data || data.length == 0) return @"";
+    NSUInteger len = MIN(data.length, maxLen);
+    NSMutableString *s = [NSMutableString stringWithCapacity:len * 2 + 24];
+    const unsigned char *bytes = (const unsigned char *)data.bytes;
+    for (NSUInteger i = 0; i < len; i++) {
+        [s appendFormat:@"%02x", bytes[i]];
+    }
+    if (data.length > maxLen) {
+        [s appendFormat:@"...(%luB)", (unsigned long)data.length];
+    }
+    return s;
+}
+
+static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id rspInfo) {
+    @try {
+        NSString *cmdStr = [cmd isKindOfClass:[NSString class]] ? cmd
+                          : (cmd ? [NSString stringWithFormat:@"%@", cmd] : @"?");
+        if (!_dumpAllRequests) {
+            if ([cmdStr rangeOfString:@"metaverse"].location == NSNotFound &&
+                [cmdStr rangeOfString:@"Task"].location == NSNotFound &&
+                [cmdStr rangeOfString:@"Quest"].location == NSNotFound &&
+                [cmdStr rangeOfString:@"qqlevel"].location == NSNotFound &&
+                [cmdStr rangeOfString:@"Score"].location == NSNotFound) {
+                return;
+            }
+        }
+        NSData *pb = nil;
+        if (rspInfo && [rspInfo respondsToSelector:@selector(pbBuffer)]) {
+            pb = [rspInfo valueForKey:@"pbBuffer"];
+        }
+        if (![pb isKindOfClass:[NSData class]]) pb = nil;
+        qqlog(@"[SSO-RSP] %@ cmd=%@ result=%d err=%@ pbLen=%lu",
+              channel, cmdStr, result, errMsg ?: @"", (unsigned long)pb.length);
+        if (pb.length > 0) {
+            qqlog(@"[SSO-PB] %@", qqfbHex(pb, 2000));
+        }
+    } @catch (NSException *e) {}
+}
+
+%hook OCIQQNTWrapperSession
+
+- (void)onSendSSOReply:(long long)arg1 ssoCmd:(id)arg2 result:(int)arg3 errMsg:(id)arg4 rspInfo:(id)arg5 {
+    qqfbLogSSOReply(@"SSO", arg2, arg3, arg4, arg5);
+    %orig;
+}
+
+- (void)onSendOidbReply:(long long)arg1 cmd:(int)arg2 result:(int)arg3 errMsg:(id)arg4 rspInfo:(id)arg5 {
+    qqfbLogSSOReply(@"OIDB", [NSString stringWithFormat:@"0x%x", arg2], arg3, arg4, arg5);
+    %orig;
+}
+
+- (void)onDispatchRequestReply:(long long)arg1 cmd:(int)arg2 pbBuffer:(id)arg3 {
+    @try {
+        if (_dumpAllRequests) {
+            NSData *pb = [pbBuffer isKindOfClass:[NSData class]] ? pbBuffer : nil;
+            qqlog(@"[SSO-DISPATCH] cmd=0x%x pbLen=%lu", (unsigned int)arg2, (unsigned long)pb.length);
+            if (pb.length > 0) qqlog(@"[SSO-PB] %@", qqfbHex(pb, 2000));
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+%end
+
+%hook OCIQQNTWrapperEngine
+
+- (void)onSendSSOReply:(long long)arg1 ssoCmd:(id)arg2 result:(int)arg3 errMsg:(id)arg4 rspInfo:(id)arg5 {
+    qqfbLogSSOReply(@"SSO-E", arg2, arg3, arg4, arg5);
+    %orig;
+}
+
+%end
+
+// Kuikly 预请求管理器：请求侧记录 cmd（QQKuiklySSORequestItem 带 cmd/uniqueId）
+%hook QQKuiklyPreRequestManager
+
+- (id)requestBySSO:(id)request completion:(id)completion {
+    @try {
+        if (_dumpAllRequests && request) {
+            NSString *cmd = [request respondsToSelector:@selector(cmd)] ? [request valueForKey:@"cmd"] : nil;
+            NSString *uid = [request respondsToSelector:@selector(uniqueId)] ? [request valueForKey:@"uniqueId"] : nil;
+            qqlog(@"[SSO-REQ] cmd=%@ uniqueId=%@", cmd ?: @"?", uid ?: @"?");
+        }
+    } @catch (NSException *e) {}
+    return %orig;
+}
+
+- (void)handleSSOResponse:(id)response result:(id)result {
+    @try {
+        if (_dumpAllRequests) {
+            qqlog(@"[SSO-HANDLE] response=%@ result=%@", response ?: @"?", result ?: @"?");
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+%end
+
+// Kuikly 平台 API：sendPbRequest 是 JS 侧发 protobuf 请求的入口
+%hook QQKuiklyPlatformApi
+
+- (void)sendPbRequest:(id)arg1 {
+    @try {
+        if (_dumpAllRequests && arg1) {
+            NSString *desc = [NSString stringWithFormat:@"%@", arg1];
+            qqlog(@"[KUILKY-PB] %@", desc.length > 800 ? [desc substringToIndex:800] : desc);
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+%end
+
 __attribute__((unused)) static void dumpWebKitCookies(void) {
     @try {
         Class wdsClass = NSClassFromString(@"WKWebsiteDataStore");

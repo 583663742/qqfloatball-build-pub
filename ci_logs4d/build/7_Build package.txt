@@ -1,0 +1,23 @@
+﻿2026-08-24T15:40:02.4385020Z ##[group]Run export THEOS_PACKAGE_SCHEME=roothide
+2026-08-24T15:40:02.4385400Z [36;1mexport THEOS_PACKAGE_SCHEME=roothide[0m
+2026-08-24T15:40:02.4385630Z [36;1mmake clean[0m
+2026-08-24T15:40:02.4385800Z [36;1mmake package FINALPACKAGE=1[0m
+2026-08-24T15:40:02.4435640Z shell: /bin/bash -e {0}
+2026-08-24T15:40:02.4435840Z env:
+2026-08-24T15:40:02.4436120Z   THEOS: /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/theos
+2026-08-24T15:40:02.4436450Z ##[endgroup]
+2026-08-24T15:40:06.4606920Z [0;36m==> [1;39mCleaning…[m
+2026-08-24T15:40:06.7354570Z [0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+2026-08-24T15:40:06.8079530Z [1;31m> [1;3;39mMaking all for tweak QQFloatBall…[m
+2026-08-24T15:40:07.8331900Z [0;31m==> [1;39mPreprocessing Tweak.xm…[m
+2026-08-24T15:40:07.9268040Z [0;32m==> [1;39mCompiling Tweak.xm (arm64e)…[m
+2026-08-24T15:40:09.1633870Z [1mTweak.xm:873:42: [0m[0;1;31merror: [0m[1mcast of an Objective-C pointer to 'SEL' is disallowed with ARC[0m
+2026-08-24T15:40:09.1634760Z                             SEL action = (SEL)object_getIvar(t, aIvar);
+2026-08-24T15:40:09.1635160Z [0;1;32m                                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2026-08-24T15:40:09.1915730Z [0m1 error generated.
+2026-08-24T15:40:09.1943050Z make[3]: *** [/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/.theos/obj/arm64e/Tweak.xm.43c45303.o] Error 1
+2026-08-24T15:40:09.1943790Z rm /Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/.theos/obj/arm64e/Tweak.xm.mm
+2026-08-24T15:40:09.1945430Z make[2]: *** [/Users/runner/work/qqfloatball-build-pub/qqfloatball-build-pub/.theos/obj/arm64e/QQFloatBall.dylib] Error 2
+2026-08-24T15:40:09.1946990Z make[1]: *** [internal-library-all_] Error 2
+2026-08-24T15:40:09.1950120Z make: *** [QQFloatBall.all.tweak.variables] Error 2
+2026-08-24T15:40:09.1956900Z ##[error]Process completed with exit code 2.

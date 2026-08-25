@@ -1,8 +1,9 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.2.18
 Description: QQ floating ball - tap to show alert
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks
 Architecture: iphoneos-arm64e
+Version: 1.2.1
+Installed-Size: 148

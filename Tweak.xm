@@ -224,40 +224,20 @@ static BOOL isLevelKeyURL(NSString *url) {
             };
             return %orig(request, wrapped);
         }
-        // v1.2.4: GetUserRecord = 等级页「福利」接口（返回 prizeList 头像挂件等，非任务）！
-        // v1.2.10: 头文件实锤 GetUserRecordTaskRsp 有 user_record_task 数组字段——prizeList 只是开头，
-        //           完整响应里可能带任务记录，必须全量解析不再截断1500字符
-        if ([url containsString:@"GetUserRecord"]) {
+        // iOS QQ 等级页走 Kuikly / CLM，不走安卓的 levelTask/Get。
+        // 只读抓取页面实际返回的任务材料和用户记录；绝不改请求、绝不触发页面动作。
+        BOOL isIOSLevelMaterial = [url containsString:@"getInitialTaskMaterial"] || [url containsString:@"GetUserRecord"];
+        if (isIOSLevelMaterial) {
             void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                 if (data && data.length > 0) {
-                    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if ([obj isKindOfClass:[NSDictionary class]]) {
-                        NSDictionary *response = obj[@"response"];
-                        if ([response isKindOfClass:[NSDictionary class]]) {
-                            // 打印所有顶层 key（不再截断）
-                            qqlog(@"[捕获] GetUserRecord response keys=%@", [response allKeys]);
-                            // 解析任务记录字段（头文件: user_record_task / userRecordList / record_list 等）
-                            NSArray *taskArr = response[@"user_record_task"];
-                            if (!taskArr) taskArr = response[@"userRecordList"];
-                            if (!taskArr) taskArr = response[@"record_list"];
-                            if (!taskArr) taskArr = response[@"task_list"];
-                            if ([taskArr isKindOfClass:[NSArray class]] && taskArr.count > 0) {
-                                _capturedTaskList = taskArr;
-                                _capturedListDirty = YES;
-                                qqlog(@"[捕获] GetUserRecord user_record_task → %lu 条", (unsigned long)taskArr.count);
-                                for (NSDictionary *t in taskArr) {
-                                    if ([t isKindOfClass:[NSDictionary class]]) {
-                                        qqlog(@"[任务] %@ | %@ | status=%@", t[@"task_id"] ?: @"?", t[@"title"] ?: @"?", t[@"status"] ?: @"?");
-                                    }
-                                }
-                            } else {
-                                // 只打印 key 结构，prizeList 内容太长跳过
-                                qqlog(@"[捕获] GetUserRecord 无任务字段, prizeList 条数=%lu", [response[@"prizeList"] count]);
-                            }
-                        }
+                    NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    if (responseText.length > 0) {
+                        qqlog(@"[iOS等级页响应] %@\n%@", url, responseText);
                     } else {
-                        qqlog(@"[捕获] GetUserRecord 响应非JSON");
+                        qqlog(@"[iOS等级页响应] %@ (非UTF-8, %lu bytes)", url, (unsigned long)data.length);
                     }
+                } else {
+                    qqlog(@"[iOS等级页响应] %@ (empty, err=%@)", url, err);
                 }
                 if (completionHandler) completionHandler(data, resp, err);
             };
@@ -1562,14 +1542,14 @@ static void showTaskPanel(void) {
     [panel addSubview:dragBar];
     [panel bringSubviewToFront:dragBar];
 
-    // 刷新
-    UIButton *refreshBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    refreshBtn.frame = CGRectMake(w - 76, 8, 56, 26);
-    [refreshBtn setTitle:@"🔄刷新" forState:UIControlStateNormal];
-    [refreshBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    refreshBtn.titleLabel.font = [UIFont systemFontOfSize:12];
-    [refreshBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:refreshBtn];
+    // 只读抓取入口：打开 iOS 等级页，记录页面实际请求和响应。
+    UIButton *captureBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    captureBtn.frame = CGRectMake(w - 126, 8, 104, 26);
+    [captureBtn setTitle:@"🌐 打开并抓取" forState:UIControlStateNormal];
+    [captureBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    captureBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    [captureBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:captureBtn];
 
     // 关闭
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -1580,72 +1560,20 @@ static void showTaskPanel(void) {
     [closeBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:closeBtn];
 
-    // 任务列表滚动区
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 40, w, h - 40 - 134)];
-    scroll.backgroundColor = [UIColor clearColor];
-    scroll.showsVerticalScrollIndicator = YES;
-    _taskScroll = scroll;
-    [panel addSubview:scroll];
-
-    // 底部按钮区（v1.2.0: 获取任务 / 执行勾选 / 打开等级页；v1.2.11: +AI 对话）
-    CGFloat by = h - 128;
-    CGFloat btnW = (w - 30 - 12) / 4.0;
-    UIButton *refreshBtn2 = [UIButton buttonWithType:UIButtonTypeCustom];
-    refreshBtn2.frame = CGRectMake(10, by, btnW, 34);
-    refreshBtn2.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.85];
-    refreshBtn2.layer.cornerRadius = 8;
-    [refreshBtn2 setTitle:@"🔄 获取" forState:UIControlStateNormal];
-    [refreshBtn2 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    refreshBtn2.titleLabel.font = [UIFont systemFontOfSize:11];
-    [refreshBtn2 addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:refreshBtn2];
-
-    UIButton *execBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    execBtn.frame = CGRectMake(12 + btnW, by, btnW, 34);
-    execBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
-    execBtn.layer.cornerRadius = 8;
-    [execBtn setTitle:@"▶ 执行" forState:UIControlStateNormal];
-    [execBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    execBtn.titleLabel.font = [UIFont systemFontOfSize:11];
-    [execBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskExecCheckedTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:execBtn];
-
-    UIButton *aiBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    aiBtn.frame = CGRectMake(14 + btnW * 2, by, btnW, 34);
-    aiBtn.backgroundColor = [[UIColor systemPurpleColor] colorWithAlphaComponent:0.85];
-    aiBtn.layer.cornerRadius = 8;
-    [aiBtn setTitle:@"🤖 AI" forState:UIControlStateNormal];
-    [aiBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    aiBtn.titleLabel.font = [UIFont systemFontOfSize:11];
-    [aiBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskAITapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:aiBtn];
-
-    UIButton *lvBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    lvBtn.frame = CGRectMake(16 + btnW * 3, by, btnW, 34);
-    lvBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
-    lvBtn.layer.cornerRadius = 8;
-    [lvBtn setTitle:@"🌐 等级页" forState:UIControlStateNormal];
-    [lvBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    lvBtn.titleLabel.font = [UIFont systemFontOfSize:11];
-    [lvBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:lvBtn];
-
-    // 日志区（内嵌，复用 _logTextView，v1.1.0 加高到 80 显示更全）
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, h - 86, w - 12, 80)];
+    // 日志区：不内置安卓任务列表、不执行任务；页面抓到什么就显示什么。
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 44, w - 12, h - 50)];
     tv.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1];
     tv.layer.cornerRadius = 6;
     tv.textColor = [UIColor whiteColor];
     tv.font = [UIFont systemFontOfSize:10];
     tv.editable = NO;
-    tv.selectable = NO;
-    tv.text = @"日志：\n";
+    tv.selectable = YES;
+    tv.text = @"iOS 等级页抓取日志：\n点「打开并抓取」后，页面实际请求和响应会原样记录在这里。\n\n";
     _logTextView = tv;
     _logView = panel;
     [panel addSubview:tv];
 
     [_floatWindow addSubview:panel];
-    // 首次打开自动拉列表
-    refreshTaskListUI();
 }
 
 // ══════════════════════════════════════════
@@ -1950,11 +1878,9 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
-    if (_autoFlowRunning) return;   // v1.2.8: 流程互斥,防止重复触发
-    _autoFlowRunning = YES;
-    appendLogView(@"[自动流程] 等级页→额外活跃→获取任务 (v1.2.11)");
-    qqlog(@"[action] 打开等级页(自动流程 v1.2.11)");
-    // 先收起自己的面板(避免悬浮球/面板挡住等级页操作 + findViewWithText 误扫到自己)
+    // iOS 只读抓取：打开等级页并记录真实请求/响应，不轮询、不点页面、不执行任务。
+    if (_dumpAllRequests) return;
+    qqlog(@"[iOS抓取] 打开等级页，开始 12 秒只读记录");
     if (_taskPanel) {
         [_taskPanel removeFromSuperview];
         _taskPanel = nil;
@@ -1962,113 +1888,22 @@ __attribute__((unused)) static void showLogPanel(void) {
         _logTextView = nil;
         _taskScroll = nil;
     }
-    // v1.2.10: 不再隐藏悬浮球——闪退根因已通过 findViewWithText/tapView 窗口有效性检查解决，
-    //           藏球导致用户看不到球(上次"球消失好久才出来"的元凶)。流程期间球保持可见。
-    // v1.2.8(已弃): 自动流程期间隐藏悬浮球,防止用户点球导致视图树变动(上次闪退根因)
-    // if (_floatBall) _floatBall.hidden = YES;
 
-    // 等级页 = Kuikly 原生渲染，用深链打开（task-center 页面自身会跳 Kuikly）
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
     NSString *b64 = [bd base64EncodedStringWithOptions:0];
     NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
     NSURL *u = [NSURL URLWithString:deep];
     if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
-        appendLogView(@"❌ 无法拉起深链，请手动: 头像→等级→额外活跃");
-        _autoFlowRunning = NO;
+        qqlog(@"[iOS抓取] 无法拉起等级页深链");
         return;
     }
-    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-    appendLogView(@"① 已拉起等级页，轮询等待渲染(最多8秒)…");
-
-    // v1.2.11: 打开等级页立即开启 8 秒 DUMP——等级页一打开就拉取全量任务列表
-    //          （29任务接口就在这8秒的请求里），不再依赖点「额外活跃」
     _dumpAllRequests = YES;
-    qqlog(@"[DUMP] 打开等级页 → 8秒全量请求记录开启（锁定29任务真实接口）");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         _dumpAllRequests = NO;
-        qqlog(@"[DUMP] 8秒记录窗口结束");
+        qqlog(@"[iOS抓取] 12 秒记录窗口结束");
     });
-
-    // v1.2.9/1.2.10: 轮询等待「额外活跃」出现（Kuikly 远程渲染慢，固定3秒不够）
-    //   v1.2.10 实证: Kuikly 视图树无文字节点，findViewWithText 永远找不到→轮询仅作兜底，
-    //   真正可靠的是等 levelTask/Get 捕获(点额外活跃后客户端自动发)。轮询缩短为 8 秒。
-    __block int pollCount = 0;
-    __block UIView *__block foundTab = nil;
-    __block void (^__block pollBlock)(void);
-    pollBlock = ^void(void) {
-        if (!_autoFlowRunning) return;   // 流程被中断则不再继续
-        if (foundTab) return;
-        pollCount++;
-        if (pollCount > 8) {
-            appendLogView(@"⏩ 未找到「额外活跃」(Kuikly无文字节点属正常)，等待客户端 levelTask/Get…");
-            qqlog(@"[流程] 8秒轮询结束,转等 levelTask/Get 捕获");
-            // 不再 dump（dump 无意义），直接等捕获
-            __block int waitRound = 0;
-            __block void (^__block waitCapture2)(void);
-            waitCapture2 = ^void(void) {
-                if (!_autoFlowRunning) return;
-                waitRound++;
-                if (_capturedTaskList && _capturedTaskList.count > 0) {
-                    _taskListCache = _capturedTaskList;
-                    appendLogView([NSString stringWithFormat:@"✅ 捕获任务 %lu 个已就绪(可在面板查看)", (unsigned long)_capturedTaskList.count]);
-                    refreshTaskListUI();
-                    _autoFlowRunning = NO;
-                    return;
-                }
-                if (waitRound >= 6) {   // 6 × 2.5s = 15s 兜底
-                    appendLogView(@"⚠️ 未捕获到任务，请手动进「额外活跃」分页后点🔄获取");
-                    _autoFlowRunning = NO;
-                    return;
-                }
-                appendLogView([NSString stringWithFormat:@"⏳ 等待任务捕获…(%d/6)", waitRound]);
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture2);
-            };
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture2);
-            return;
-        }
-        appendLogView([NSString stringWithFormat:@"② 等待「额外活跃」… (%d/8)", pollCount]);
-        UIView *tab = findViewWithText(nil, @"额外活跃");
-        if (!tab) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), pollBlock);
-            return;
-        }
-        foundTab = tab;
-        appendLogView(@"✅ 找到「额外活跃」，点击切换…");
-        qqlog(@"[UI自动化] 点击「额外活跃」 tab");
-        tapView(tab);
-        // v1.2.9: 点击后开 5 秒 DUMP 窗口，无条件记录所有请求 URL+body（锁定33任务真实接口）
-        _dumpAllRequests = YES;
-        qqlog(@"[DUMP] 额外活跃点击 → 5秒全量请求记录开启");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            _dumpAllRequests = NO;
-            qqlog(@"[DUMP] 5秒记录窗口结束");
-        });
-        // 等待 levelTask/Get 响应捕获（客户端点额外活跃后自动发，2.5秒后检查，最多等 3 轮）
-        __block int waitRound = 0;
-        __block void (^__block waitCapture)(void);
-        waitCapture = ^void(void) {
-            if (!_autoFlowRunning) return;
-            waitRound++;
-            if (_capturedTaskList && _capturedTaskList.count > 0) {
-                _taskListCache = _capturedTaskList;
-                appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
-                refreshTaskListUI();
-                _autoFlowRunning = NO;
-                return;
-            }
-            if (waitRound >= 3) {
-                appendLogView(@"⚠️ 未捕获到任务，请确认「额外活跃」分页已展开(或任务已清空)");
-                refreshTaskListUI();
-                _autoFlowRunning = NO;
-                return;
-            }
-            appendLogView([NSString stringWithFormat:@"⏳ 等待任务捕获…(%d/3)", waitRound]);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture);
-        };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture);
-    };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), pollBlock);
 }
 
 %new

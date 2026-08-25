@@ -958,39 +958,6 @@ static BOOL tapView(UIView *v) {
     return NO;
 }
 
-// ── dump 所有窗口的含文字视图（调试：找不到目标时看页面结构）──
-static void dumpTextViews(void) {
-    @try {
-        NSMutableString *outS = [NSMutableString string];
-        [outS appendString:@"\n═══ 视图文字 dump（所有 window）═══\n"];
-        __block int count = 0;
-        __block void (^walk)(UIView *, int);
-        void (^walkImpl)(UIView *, int) = ^(UIView *view, int depth) {
-            if (count > 80 || depth > 12) return;
-            if (view == _taskPanel) return;
-            @try {
-                NSString *txt = nil;
-                if ([view isKindOfClass:[UILabel class]]) txt = ((UILabel *)view).text;
-                else if ([view isKindOfClass:[UIButton class]]) txt = ((UIButton *)view).currentTitle;
-                else txt = view.accessibilityLabel;
-                if (txt && txt.length > 0) {
-                    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
-                    [outS appendFormat:@"%@[d%d]%@\n", indent, depth, txt.length > 30 ? [txt substringToIndex:30] : txt];
-                    count++;
-                }
-            } @catch (NSException *e) {}
-            for (UIView *sub in view.subviews) walk(sub, depth + 1);
-        };
-        walk = walkImpl;
-        for (UIWindow *win in [UIApplication sharedApplication].windows) {
-            [outS appendFormat:@"─ window: %@\n", NSStringFromClass([win class])];
-            walk(win, 0);
-        }
-        [outS appendString:@"═══ end ═══"];
-        qqlog(@"%@", outS);
-    } @catch (NSException *e) {}
-}
-
 // ── 在任务列表里按标题找任务状态（-1=不存在）──
 static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
     for (NSDictionary *task in taskList) {

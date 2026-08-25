@@ -655,12 +655,19 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
                                     void (^wrapBlock)(id) = ^(id result) {
                                         @try {
                                             if (_dumpAllRequests) {
-                                                if ([result isKindOfClass:[NSData class]]) {
+                                                // result 结构实测 = (code, errMsg, NSData pbBody, 0, 0)
+                                                // 取第 3 元素（index 2）才是 protobuf body
+                                                id payload = result;
+                                                if ([result isKindOfClass:[NSArray class]] && [(NSArray *)result count] > 2) {
+                                                    payload = [(NSArray *)result objectAtIndex:2];
+                                                    qqlog(@"[KUILKY-PB-RSP] cmd=%@ full=%@", bCmd, [result description]);
+                                                }
+                                                if ([payload isKindOfClass:[NSData class]]) {
                                                     qqlog(@"[KUILKY-PB-RSP] cmd=%@ dataLen=%lu dataHex=%@",
-                                                          bCmd, (unsigned long)[(NSData *)result length],
-                                                          qqfbHex((NSData *)result, 8000));
+                                                          bCmd, (unsigned long)[(NSData *)payload length],
+                                                          qqfbHex((NSData *)payload, 60000));
                                                 } else {
-                                                    NSString *rd = [NSString stringWithFormat:@"%@", result];
+                                                    NSString *rd = [NSString stringWithFormat:@"%@", payload];
                                                     qqlog(@"[KUILKY-PB-RSP] cmd=%@ result=%@",
                                                           bCmd, rd.length > 2000 ? [rd substringToIndex:2000] : rd);
                                                 }

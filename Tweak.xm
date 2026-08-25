@@ -620,8 +620,9 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
 // 响应改由下方 RohanaSwiftHook / AIRequestModule 签名确定的方法捕获
 %hook QQKuiklyPlatformApi
 
-// v1.2.22: 完整记录请求（cmd + pb body hex + callback block 签名探测）
-// 用 _Block_signature 只读探测 block 真实签名，不猜不调用（v1.2.20 闪退教训）
+// v1.2.23: 完整记录请求 + 安全包装 callback block 捕获响应
+// v1.2.22 实测 callback 签名 v16@?0@8 = void(^)(id)（单参数，_Block_signature 实锤）
+// v1.2.20 闪退根因 = 猜了多参数签名；现在签名已实锤，只对匹配签名的 block 包装
 - (void)sendPbRequest:(id)arg1 {
     @try {
         if (_dumpAllRequests && arg1) {
@@ -640,24 +641,54 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
                           cmd, (unsigned long)[pa count],
                           (unsigned long)pbBody.length,
                           pbBody ? qqfbHex(pbBody, 8000) : @"nil");
-                    // 响应 callback 探测：block 真实签名（只读，零风险）
-                    id cb = nil;
-                    if ([arg1 isKindOfClass:[NSDictionary class]]) cb = [(NSDictionary *)arg1 objectForKey:@"callback"];
-                    if (cb) {
-                        @try {
-                            const char *sig = _Block_signature((__bridge const void *)cb);
-                            qqlog(@"[KUILKY-PB-CB] callback=%@ sig=%s", cb, sig ?: "(nil)");
-                        } @catch (NSException *e2) {
-                            qqlog(@"[KUILKY-PB-CB] 探测异常 %@", e2);
+                    // 响应捕获：callback block 签名 v16@?0@8 = void(^)(id) 单参数 → 安全包装
+                    if ([arg1 isKindOfClass:[NSDictionary class]]) {
+                        id cb = [(NSDictionary *)arg1 objectForKey:@"callback"];
+                        if (cb) {
+                            @try {
+                                const char *sig = _Block_signature((__bridge const void *)cb);
+                                qqlog(@"[KUILKY-PB-CB] cmd=%@ callback=%@ sig=%s", cmd, cb, sig ?: "(nil)");
+                                if (sig && strcmp(sig, "v16@?0@8") == 0) {
+                                    // 签名实锤单参数 id → 包装：记录响应 → 调原 block
+                                    void (^origBlock)(id) = cb;
+                                    __block NSString *bCmd = cmd;
+                                    void (^wrapBlock)(id) = ^(id result) {
+                                        @try {
+                                            if (_dumpAllRequests) {
+                                                if ([result isKindOfClass:[NSData class]]) {
+                                                    qqlog(@"[KUILKY-PB-RSP] cmd=%@ dataLen=%lu dataHex=%@",
+                                                          bCmd, (unsigned long)[(NSData *)result length],
+                                                          qqfbHex((NSData *)result, 8000));
+                                                } else {
+                                                    NSString *rd = [NSString stringWithFormat:@"%@", result];
+                                                    qqlog(@"[KUILKY-PB-RSP] cmd=%@ result=%@",
+                                                          bCmd, rd.length > 2000 ? [rd substringToIndex:2000] : rd);
+                                                }
+                                                qqfbScheduleAutoStop();
+                                            }
+                                        } @catch (NSException *e) {
+                                            qqlog(@"[KUILKY-PB-RSP] 记录异常 %@", e);
+                                        }
+                                        if (origBlock) origBlock(result);
+                                    };
+                                    // 替换 arg1 字典里的 callback 为包装版
+                                    NSMutableDictionary *md = [arg1 mutableCopy];
+                                    md[@"callback"] = wrapBlock;
+                                    arg1 = md;
+                                    qqlog(@"[KUILKY-PB-WRAP] cmd=%@ 已包装 callback 捕获响应", cmd);
+                                }
+                            } @catch (NSException *e2) {
+                                qqlog(@"[KUILKY-PB-CB] 探测异常 %@", e2);
+                            }
                         }
                     }
                 }
             } @catch (NSException *e) {}
-            // 响应未直接绑定，靠自动停止窗口兜底
+            // 响应到达自动续期自动停止窗口
             if (_dumpAllRequests) qqfbScheduleAutoStop();
         }
     } @catch (NSException *e) {}
-    %orig;
+    %orig(arg1);
 }
 
 %end

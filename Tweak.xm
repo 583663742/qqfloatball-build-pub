@@ -41,6 +41,8 @@ static NSString *_capturedQunPskey = nil;
 static BOOL _captureEnabled = NO;
 // ── 仅抓等级关键词（keyTask）时才包装响应；全量模式只记请求不碰响应（防 Kuikly 白屏）──
 static BOOL _captureOnlyTasks = NO;
+// ── v1.2.9: 点击「额外活跃」后 5 秒内无条件记录所有请求 URL+body（锁定33任务真实接口）──
+static BOOL _dumpAllRequests = NO;
 
 // ── 一键任务执行状态 ──
 static BOOL _taskRunning = NO;
@@ -177,6 +179,12 @@ static BOOL isLevelKeyURL(NSString *url) {
     @try {
         NSString *url = request.URL.absoluteString ?: @"";
         BOOL isLevelGet = [url containsString:@"levelTask/Get"];
+        // v1.2.9: 点击「额外活跃」后的 5 秒内，无条件记录所有请求 URL+body（锁定33任务真实接口）
+        if (_dumpAllRequests && !isLevelGet) {
+            NSString *body = request.HTTPBody ? [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding] : @"";
+            qqlogAsync(@"[DUMP] %@ %@ body=%@", request.HTTPMethod ?: @"GET", url,
+                       body.length > 400 ? [body substringToIndex:400] : body);
+        }
         // v1.2.2: 无论抓包开关，只要 URL 是 levelTask/Get 就拦截响应存全量任务列表
         //（QQ 客户端自己带 skey 全凭证请求，服务端返回的就是完整任务；我们只读不改）
         if (isLevelGet) {
@@ -197,8 +205,8 @@ static BOOL isLevelKeyURL(NSString *url) {
             };
             return %orig(request, wrapped);
         }
-        // v1.2.4: GetUserRecord = 等级页"额外活跃"任务真实接口(分页 num:10 startIndex:0..n)！
-        //  拦截响应：任务在 data.user_record_list 或类似字段，先打印结构再解析
+        // v1.2.4: GetUserRecord = 等级页「福利」接口（返回 prizeList 头像挂件等，非任务）！
+        //         2026-08-25 实锤：响应只有 prizeList 福利，额外活跃33任务接口另有其接口（待 v1.2.9 DUMP 锁定）
         if ([url containsString:@"GetUserRecord"]) {
             void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                 if (data && data.length > 0) {
@@ -319,6 +327,12 @@ static BOOL isLevelKeyURL(NSString *url) {
 + (void)requestWithMethod:(id)method url:(id)url param:(id)param headers:(id)headers timeout:(float)timeout cookie:(id)cookie responseBlock:(id)responseBlock {
     @try {
         NSString *u = [url isKindOfClass:[NSString class]] ? url : @"";
+        // v1.2.9: 点击「额外活跃」后的 5 秒内，无条件记录所有 Kuikly 请求（锁定33任务真实接口）
+        if (_dumpAllRequests) {
+            NSString *m9 = [method isKindOfClass:[NSString class]] ? method : @"GET";
+            NSString *p9 = param ? [NSString stringWithFormat:@"%@", param] : @"";
+            qqlogAsync(@"[DUMP-K] %@ %@ param=%@", m9, u, p9.length > 500 ? [p9 substringToIndex:500] : p9);
+        }
         // v1.2.3: qqlevel 相关无条件记录（找"额外活跃"33任务的真实接口），其余按抓包开关
         if ([u containsString:@"qqlevel"] || [u containsString:@"levelTask"] || [u containsString:@"GetUserRecord"]) {
             NSString *m = [method isKindOfClass:[NSString class]] ? method : @"GET";
@@ -345,6 +359,10 @@ static BOOL isLevelKeyURL(NSString *url) {
 - (void)setRequestUrl:(NSString *)requestUrl {
     @try {
         NSString *u = requestUrl ?: @"";
+        // v1.2.9: 点击「额外活跃」后的 5 秒内，无条件记录所有 QQCR 请求（锁定33任务真实接口）
+        if (_dumpAllRequests) {
+            qqlogAsync(@"[DUMP-C] setRequestUrl=%@", u);
+        }
         // v1.2.3: qqlevel 相关无条件记录（找"额外活跃"33任务的真实接口）
         if ([u containsString:@"qqlevel"] || [u containsString:@"levelTask"] || [u containsString:@"GetUserRecord"]) {
             qqlogAsync(@"[QQCR] setRequestUrl=%@", u);
@@ -1778,53 +1796,69 @@ __attribute__((unused)) static void showLogPanel(void) {
         return;
     }
     [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-    appendLogView(@"① 已拉起等级页，等 3 秒加载…");
+    appendLogView(@"① 已拉起等级页，轮询等待渲染(最多20秒)…");
 
-    __block int step = 1;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!_autoFlowRunning) return;   // v1.2.8: 流程被中断则不再继续
-        if (step != 1) return; step = 2;
-        appendLogView(@"② 找「额外活跃」分页…");
-        UIView *tab = findViewWithText(nil, @"额外活跃");
-        if (tab) {
-            appendLogView(@"✅ 找到「额外活跃」，点击切换…");
-            qqlog(@"[UI自动化] 点击「额外活跃」 tab");
-            tapView(tab);
-        } else {
-            appendLogView(@"⚠️ 没找到「额外活跃」，dump 视图文字看结构");
+    // v1.2.9: 轮询等待「额外活跃」出现（Kuikly 远程渲染慢，固定3秒不够，上次空跑根因）
+    //         每 1 秒查一次，最多 20 次；期间用户可手动切分页，找到即点。
+    __block int pollCount = 0;
+    __block UIView *__block foundTab = nil;
+    __block void (^__block pollBlock)(void);
+    __block __weak id weakSelf = nil; // 仅占位，实际用 dispatch block 捕获
+    pollBlock = ^void(void) {
+        if (!_autoFlowRunning) return;   // 流程被中断则不再继续
+        if (foundTab) return;
+        pollCount++;
+        if (pollCount > 20) {
+            appendLogView(@"⚠️ 20秒内未出现「额外活跃」，dump 视图文字看结构");
             dumpTextViews();
             if (_floatBall) _floatBall.hidden = NO;
             _autoFlowRunning = NO;
             return;
         }
-        // v1.2.8: 不再找「展开」——点击额外活跃后客户端会自动发 levelTask/Get(带全凭证),
-        //          响应被拦截存进 _capturedTaskList。只需等 2.5 秒捕获后刷新面板即可。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        appendLogView([NSString stringWithFormat:@"② 等待「额外活跃」… (%d/20)", pollCount]);
+        UIView *tab = findViewWithText(nil, @"额外活跃");
+        if (!tab) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), pollBlock);
+            return;
+        }
+        foundTab = tab;
+        appendLogView(@"✅ 找到「额外活跃」，点击切换…");
+        qqlog(@"[UI自动化] 点击「额外活跃」 tab");
+        tapView(tab);
+        // v1.2.9: 点击后开 5 秒 DUMP 窗口，无条件记录所有请求 URL+body（锁定33任务真实接口）
+        _dumpAllRequests = YES;
+        qqlog(@"[DUMP] 额外活跃点击 → 5秒全量请求记录开启");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            _dumpAllRequests = NO;
+            qqlog(@"[DUMP] 5秒记录窗口结束");
+        });
+        // 等待 levelTask/Get 响应捕获（客户端点额外活跃后自动发，2.5秒后检查，最多等 3 轮）
+        __block int waitRound = 0;
+        __block void (^__block waitCapture)(void);
+        waitCapture = ^void(void) {
             if (!_autoFlowRunning) return;
-            appendLogView(@"③ 等待客户端 levelTask/Get 响应…");
+            waitRound++;
             if (_capturedTaskList && _capturedTaskList.count > 0) {
                 _taskListCache = _capturedTaskList;
                 appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
                 refreshTaskListUI();
-            } else {
-                appendLogView(@"⚠️ 尚未捕获到任务列表，再等 3 秒…");
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (_capturedTaskList && _capturedTaskList.count > 0) {
-                        _taskListCache = _capturedTaskList;
-                        appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
-                    } else {
-                        appendLogView(@"❌ 未捕获到任务，请确认等级页「额外活跃」分页已展开");
-                    }
-                    refreshTaskListUI();
-                    if (_floatBall) _floatBall.hidden = NO;
-                    _autoFlowRunning = NO;
-                });
+                if (_floatBall) _floatBall.hidden = NO;
+                _autoFlowRunning = NO;
                 return;
             }
-            if (_floatBall) _floatBall.hidden = NO;
-            _autoFlowRunning = NO;
-        });
-    });
+            if (waitRound >= 3) {
+                appendLogView(@"⚠️ 未捕获到任务，请确认「额外活跃」分页已展开(或任务已清空)");
+                refreshTaskListUI();
+                if (_floatBall) _floatBall.hidden = NO;
+                _autoFlowRunning = NO;
+                return;
+            }
+            appendLogView([NSString stringWithFormat:@"⏳ 等待任务捕获…(%d/3)", waitRound]);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture);
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture);
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), pollBlock);
 }
 
 %new

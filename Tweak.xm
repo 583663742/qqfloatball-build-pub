@@ -188,6 +188,12 @@ static BOOL isLevelKeyURL(NSString *url) {
         // v1.2.2: 无论抓包开关，只要 URL 是 levelTask/Get 就拦截响应存全量任务列表
         //（QQ 客户端自己带 skey 全凭证请求，服务端返回的就是完整任务；我们只读不改）
         if (isLevelGet) {
+            // v1.2.10: 先打印请求 URL+body——客户端点「额外活跃」时发的 mode 参数决定返回哪些任务
+            //          （10 vs 33 之谜的关键：mode=42/all 返回不同集合）
+            NSString *reqBody = request.HTTPBody ? [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding] : @"";
+            if (reqBody.length > 0) {
+                qqlog(@"[捕获] levelTask/Get 请求 body=%@", reqBody.length > 500 ? [reqBody substringToIndex:500] : reqBody);
+            }
             void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                 if (data && data.length > 0) {
                     id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -198,6 +204,12 @@ static BOOL isLevelKeyURL(NSString *url) {
                             _capturedTaskList = list;
                             _capturedListDirty = YES;
                             qqlog(@"[捕获] 客户端原生 levelTask/Get → %lu 个任务", (unsigned long)list.count);
+                            // v1.2.10: 打印每个任务的 title，确认是否额外活跃任务集合
+                            for (NSDictionary *t in list) {
+                                if ([t isKindOfClass:[NSDictionary class]]) {
+                                    qqlog(@"[任务] %@ | %@ | days=%@", t[@"task_id"] ?: @"?", t[@"title"] ?: @"?", t[@"accelerate_days"] ?: @"?");
+                                }
+                            }
                         }
                     }
                 }
@@ -206,12 +218,39 @@ static BOOL isLevelKeyURL(NSString *url) {
             return %orig(request, wrapped);
         }
         // v1.2.4: GetUserRecord = 等级页「福利」接口（返回 prizeList 头像挂件等，非任务）！
-        //         2026-08-25 实锤：响应只有 prizeList 福利，额外活跃33任务接口另有其接口（待 v1.2.9 DUMP 锁定）
+        // v1.2.10: 头文件实锤 GetUserRecordTaskRsp 有 user_record_task 数组字段——prizeList 只是开头，
+        //           完整响应里可能带任务记录，必须全量解析不再截断1500字符
         if ([url containsString:@"GetUserRecord"]) {
             void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
                 if (data && data.length > 0) {
-                    NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                    qqlog(@"[捕获] GetUserRecord 响应: %@", respStr.length > 1500 ? [respStr substringToIndex:1500] : respStr);
+                    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([obj isKindOfClass:[NSDictionary class]]) {
+                        NSDictionary *response = obj[@"response"];
+                        if ([response isKindOfClass:[NSDictionary class]]) {
+                            // 打印所有顶层 key（不再截断）
+                            qqlog(@"[捕获] GetUserRecord response keys=%@", [response allKeys]);
+                            // 解析任务记录字段（头文件: user_record_task / userRecordList / record_list 等）
+                            NSArray *taskArr = response[@"user_record_task"];
+                            if (!taskArr) taskArr = response[@"userRecordList"];
+                            if (!taskArr) taskArr = response[@"record_list"];
+                            if (!taskArr) taskArr = response[@"task_list"];
+                            if ([taskArr isKindOfClass:[NSArray class]] && taskArr.count > 0) {
+                                _capturedTaskList = taskArr;
+                                _capturedListDirty = YES;
+                                qqlog(@"[捕获] GetUserRecord user_record_task → %lu 条", (unsigned long)taskArr.count);
+                                for (NSDictionary *t in taskArr) {
+                                    if ([t isKindOfClass:[NSDictionary class]]) {
+                                        qqlog(@"[任务] %@ | %@ | status=%@", t[@"task_id"] ?: @"?", t[@"title"] ?: @"?", t[@"status"] ?: @"?");
+                                    }
+                                }
+                            } else {
+                                // 只打印 key 结构，prizeList 内容太长跳过
+                                qqlog(@"[捕获] GetUserRecord 无任务字段, prizeList 条数=%lu", [response[@"prizeList"] count]);
+                            }
+                        }
+                    } else {
+                        qqlog(@"[捕获] GetUserRecord 响应非JSON");
+                    }
                 }
                 if (completionHandler) completionHandler(data, resp, err);
             };
@@ -1770,8 +1809,8 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
     if (_autoFlowRunning) return;   // v1.2.8: 流程互斥,防止重复触发
     _autoFlowRunning = YES;
-    appendLogView(@"[自动流程] 等级页→额外活跃→获取任务 (v1.2.8)");
-    qqlog(@"[action] 打开等级页(自动流程 v1.2.8)");
+    appendLogView(@"[自动流程] 等级页→额外活跃→获取任务 (v1.2.10)");
+    qqlog(@"[action] 打开等级页(自动流程 v1.2.10)");
     // 先收起自己的面板(避免悬浮球/面板挡住等级页操作 + findViewWithText 误扫到自己)
     if (_taskPanel) {
         [_taskPanel removeFromSuperview];
@@ -1780,8 +1819,10 @@ __attribute__((unused)) static void showLogPanel(void) {
         _logTextView = nil;
         _taskScroll = nil;
     }
-    // v1.2.8: 自动流程期间隐藏悬浮球,防止用户点球导致视图树变动(上次闪退根因)
-    if (_floatBall) _floatBall.hidden = YES;
+    // v1.2.10: 不再隐藏悬浮球——闪退根因已通过 findViewWithText/tapView 窗口有效性检查解决，
+    //           藏球导致用户看不到球(上次"球消失好久才出来"的元凶)。流程期间球保持可见。
+    // v1.2.8(已弃): 自动流程期间隐藏悬浮球,防止用户点球导致视图树变动(上次闪退根因)
+    // if (_floatBall) _floatBall.hidden = YES;
 
     // 等级页 = Kuikly 原生渲染，用深链打开（task-center 页面自身会跳 Kuikly）
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
@@ -1791,31 +1832,50 @@ __attribute__((unused)) static void showLogPanel(void) {
     NSURL *u = [NSURL URLWithString:deep];
     if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
         appendLogView(@"❌ 无法拉起深链，请手动: 头像→等级→额外活跃");
-        if (_floatBall) _floatBall.hidden = NO;
         _autoFlowRunning = NO;
         return;
     }
     [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-    appendLogView(@"① 已拉起等级页，轮询等待渲染(最多20秒)…");
+    appendLogView(@"① 已拉起等级页，轮询等待渲染(最多8秒)…");
 
-    // v1.2.9: 轮询等待「额外活跃」出现（Kuikly 远程渲染慢，固定3秒不够，上次空跑根因）
-    //         每 1 秒查一次，最多 20 次；期间用户可手动切分页，找到即点。
+    // v1.2.9/1.2.10: 轮询等待「额外活跃」出现（Kuikly 远程渲染慢，固定3秒不够）
+    //   v1.2.10 实证: Kuikly 视图树无文字节点，findViewWithText 永远找不到→轮询仅作兜底，
+    //   真正可靠的是等 levelTask/Get 捕获(点额外活跃后客户端自动发)。轮询缩短为 8 秒。
     __block int pollCount = 0;
     __block UIView *__block foundTab = nil;
     __block void (^__block pollBlock)(void);
-    __block __weak id weakSelf = nil; // 仅占位，实际用 dispatch block 捕获
     pollBlock = ^void(void) {
         if (!_autoFlowRunning) return;   // 流程被中断则不再继续
         if (foundTab) return;
         pollCount++;
-        if (pollCount > 20) {
-            appendLogView(@"⚠️ 20秒内未出现「额外活跃」，dump 视图文字看结构");
-            dumpTextViews();
-            if (_floatBall) _floatBall.hidden = NO;
-            _autoFlowRunning = NO;
+        if (pollCount > 8) {
+            appendLogView(@"⏩ 未找到「额外活跃」(Kuikly无文字节点属正常)，等待客户端 levelTask/Get…");
+            qqlog(@"[流程] 8秒轮询结束,转等 levelTask/Get 捕获");
+            // 不再 dump（dump 无意义），直接等捕获
+            __block int waitRound = 0;
+            __block void (^__block waitCapture2)(void);
+            waitCapture2 = ^void(void) {
+                if (!_autoFlowRunning) return;
+                waitRound++;
+                if (_capturedTaskList && _capturedTaskList.count > 0) {
+                    _taskListCache = _capturedTaskList;
+                    appendLogView([NSString stringWithFormat:@"✅ 捕获任务 %lu 个已就绪(可在面板查看)", (unsigned long)_capturedTaskList.count]);
+                    refreshTaskListUI();
+                    _autoFlowRunning = NO;
+                    return;
+                }
+                if (waitRound >= 6) {   // 6 × 2.5s = 15s 兜底
+                    appendLogView(@"⚠️ 未捕获到任务，请手动进「额外活跃」分页后点🔄获取");
+                    _autoFlowRunning = NO;
+                    return;
+                }
+                appendLogView([NSString stringWithFormat:@"⏳ 等待任务捕获…(%d/6)", waitRound]);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture2);
+            };
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitCapture2);
             return;
         }
-        appendLogView([NSString stringWithFormat:@"② 等待「额外活跃」… (%d/20)", pollCount]);
+        appendLogView([NSString stringWithFormat:@"② 等待「额外活跃」… (%d/8)", pollCount]);
         UIView *tab = findViewWithText(nil, @"额外活跃");
         if (!tab) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), pollBlock);
@@ -1842,14 +1902,12 @@ __attribute__((unused)) static void showLogPanel(void) {
                 _taskListCache = _capturedTaskList;
                 appendLogView([NSString stringWithFormat:@"✅ 全量任务 %lu 个已就绪", (unsigned long)_capturedTaskList.count]);
                 refreshTaskListUI();
-                if (_floatBall) _floatBall.hidden = NO;
                 _autoFlowRunning = NO;
                 return;
             }
             if (waitRound >= 3) {
                 appendLogView(@"⚠️ 未捕获到任务，请确认「额外活跃」分页已展开(或任务已清空)");
                 refreshTaskListUI();
-                if (_floatBall) _floatBall.hidden = NO;
                 _autoFlowRunning = NO;
                 return;
             }
@@ -2300,11 +2358,6 @@ static void qqfloatball_ctor(void) {
             // 在主队列等 2 秒再试
             [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.0]];
         }
-        // v1.1.3：球建好后默认自动打开任务面板（右上角），打开界面即可见日志
-        if (_floatBall) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showTaskPanel();
-            });
-        }
+        // v1.2.10: 球建好后不自动弹面板（用户明确要求"默认面板不要打开就弹出来"）
     });
 }

@@ -1447,10 +1447,10 @@ static void showTaskPanel(void) {
     [panel addSubview:dragBar];
     [panel bringSubviewToFront:dragBar];
 
-    // 两个独立操作：先打开页面，再在目标页面手动开始只读抓取。
+    // 两个操作：打开并抓取（先开抓包再打开页面），或单独抓取当前页面。
     UIButton *openBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     openBtn.frame = CGRectMake(w - 184, 8, 78, 26);
-    [openBtn setTitle:@"🌐 打开等级" forState:UIControlStateNormal];
+    [openBtn setTitle:@"🌐 打开并抓取" forState:UIControlStateNormal];
     [openBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
     openBtn.titleLabel.font = [UIFont systemFontOfSize:11];
     [openBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1481,7 +1481,7 @@ static void showTaskPanel(void) {
     tv.font = [UIFont systemFontOfSize:10];
     tv.editable = NO;
     tv.selectable = YES;
-    tv.text = @"iOS 等级页抓取日志：\n先点「打开等级」，进入你要观察的页面后再点「抓取」。\n抓取只记录当前页面真实请求和响应，不会自动点击或执行任务。\n\n";
+    tv.text = @"iOS 等级页抓取日志：\n点「打开并抓取」会先开启抓包，再打开等级页，记录 30 秒初始化请求。\n也可以先进入页面，再点「抓取」补抓当前页面。\n\n";
     _logTextView = tv;
     _logView = panel;
     [panel addSubview:tv];
@@ -1792,19 +1792,36 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
-    // 仅打开页面：不改变抓取状态，不读写页面内容。
+    // 关键时序：先开启抓包，再打开等级页，确保不漏掉首轮初始化请求。
+    if (_dumpAllRequests) {
+        appendLogView(@"[iOS抓取] 已在抓取中，请直接进入等级界面");
+        return;
+    }
+    _dumpAllRequests = YES;
+    appendLogView(@"[iOS抓取] 已开启，准备打开等级页…");
+    qqlog(@"[iOS抓取] 先开抓包，再打开等级页");
+
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
     NSString *b64 = [bd base64EncodedStringWithOptions:0];
     NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
     NSURL *u = [NSURL URLWithString:deep];
     if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
+        _dumpAllRequests = NO;
         appendLogView(@"[iOS抓取] 无法拉起等级页深链");
         return;
     }
-    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+        appendLogView(@"[iOS抓取] 等级页已打开，30 秒内记录初始化与页面请求");
+        qqlog(@"[iOS抓取] 等级页已打开，30 秒抓包窗口开始");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        _dumpAllRequests = NO;
+        appendLogView(@"[iOS抓取] 30 秒记录窗口结束");
+        qqlog(@"[iOS抓取] 30 秒记录窗口结束");
+    });
 }
-
 %new
 - (void)_taskCaptureTapped:(UIButton *)sender {
     // 仅抓取当前页面的真实网络流量，20 秒后自动停止。

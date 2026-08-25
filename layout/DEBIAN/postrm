@@ -1,19 +1,20 @@
 #!/bin/bash
-# QQFloatBall postrm — 卸载清理 dylib/plist/roothidepatch 链接
-DYLIB_NAME="QQFloatBall"
-
-for DIR in /var/jb/usr/lib/TweakInject /Library/MobileSubstrate/DynamicLibraries; do
-    if [ -d "$DIR" ]; then
-        rm -f "$DIR/${DYLIB_NAME}.dylib.roothidepatch" \
-              "$DIR/${DYLIB_NAME}.dylib.DISABLED" \
-              "$DIR/${DYLIB_NAME}.dylib.bak" \
-              "$DIR/${DYLIB_NAME}.plist" \
-              "$DIR/${DYLIB_NAME}.dylib"
-    fi
-done
-
-# 清理插件日志
-find /var/mobile/Containers/Data/Application -maxdepth 4 -name "qqflog*" -exec rm -f {} + 2>/dev/null || true
-find /var/mobile/Containers/Data/Application -maxdepth 4 -name "QQFloatBall*" -exec rm -f {} + 2>/dev/null || true
+# QQFloatBall postrm — 仅在真正卸载时清理，升级时不能删除新包刚解开的同名文件。
+case "$1" in
+    remove|purge)
+        DYLIB_NAME="QQFloatBall"
+        for DIR in /var/jb/usr/lib/TweakInject /Library/MobileSubstrate/DynamicLibraries; do
+            if [ -d "$DIR" ]; then
+                rm -f "$DIR/${DYLIB_NAME}.dylib.roothidepatch" \
+                      "$DIR/${DYLIB_NAME}.dylib.DISABLED" \
+                      "$DIR/${DYLIB_NAME}.dylib.bak" \
+                      "$DIR/${DYLIB_NAME}.plist" \
+                      "$DIR/${DYLIB_NAME}.dylib"
+            fi
+        done
+        find /var/mobile/Containers/Data/Application -maxdepth 4 -name "qqflog*" -exec rm -f {} + 2>/dev/null || true
+        find /var/mobile/Containers/Data/Application -maxdepth 4 -name "QQFloatBall*" -exec rm -f {} + 2>/dev/null || true
+        ;;
+esac
 
 exit 0

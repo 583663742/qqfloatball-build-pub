@@ -572,44 +572,97 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
 %end
 
 // Kuikly 平台 API：sendPbRequest 是 JS 侧发 protobuf 请求的入口
+// v1.2.21: 不再包装 callback block（v1.2.20 猜签名导致闪退），只记录请求；
+// 响应改由下方 RohanaSwiftHook / AIRequestModule 签名确定的方法捕获
 %hook QQKuiklyPlatformApi
 
 - (void)sendPbRequest:(id)arg1 {
     @try {
-        if (_dumpAllRequests && [arg1 isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *payload = (NSDictionary *)arg1;
-            id params = payload[@"param"];
+        if (_dumpAllRequests && arg1) {
             NSString *desc = [NSString stringWithFormat:@"%@", arg1];
             qqlog(@"[KUILKY-PB] %@", desc.length > 800 ? [desc substringToIndex:800] : desc);
-            if ([params isKindOfClass:[NSArray class]]) {
-                id cmd = [(NSArray *)params count] > 0 ? params[0] : nil;
-                qqlog(@"[KUILKY-PB-REQ] cmd=%@ paramCount=%lu", cmd ?: @"?", (unsigned long)[(NSArray *)params count]);
-            }
-
-            // Kuikly 的任务回包通过 payload.callback block 返回；保留原参数，
-            // 只在回调入口记录结果，再原样转交给 QQ。
-            id callback = payload[@"callback"];
-            if (callback) {
-                void (^original)(id, id, id, int, id) = [callback copy];
-                NSMutableDictionary *wrapped = [payload mutableCopy];
-                NSArray *requestParams = [params isKindOfClass:[NSArray class]] ? [params copy] : nil;
-                wrapped[@"callback"] = ^(id cmd, id response, id traceId, int resultCode, id extra) {
-                    @try {
-                        if (_dumpAllRequests) {
-                            NSString *cmdDesc = cmd ? [NSString stringWithFormat:@"%@", cmd] : (requestParams.count > 0 ? [NSString stringWithFormat:@"%@", requestParams[0]] : @"?");
-                            NSString *out = response ? [NSString stringWithFormat:@"%@", response] : @"nil";
-                            if (out.length > 3000) out = [out substringToIndex:3000];
-                            qqlog(@"[KUILKY-PB-RSP] cmd=%@ code=%d trace=%@ result=%@ extra=%@", cmdDesc, resultCode, traceId ?: @"", out, extra ?: @"");
-                            if ([response isKindOfClass:[NSData class]]) qqlog(@"[KUILKY-PB-RSP-HEX] %@", qqfbHex(response, 4000));
-                        }
-                    } @catch (NSException *e) {}
-                    original(cmd, response, traceId, resultCode, extra);
-                };
-                arg1 = wrapped;
-            }
+            // 尝试从参数容器里安全提取 param 数组（不包装，纯读取）
+            @try {
+                id params = nil;
+                if ([arg1 isKindOfClass:[NSDictionary class]]) params = [(NSDictionary *)arg1 objectForKey:@"param"];
+                if ([arg1 respondsToSelector:@selector(objectForKey:)]) params = [arg1 objectForKey:@"param"];
+                if ([params isKindOfClass:[NSArray class]] && [(NSArray *)params count] > 0) {
+                    qqlog(@"[KUILKY-PB-REQ] cmd=%@ paramCount=%lu", params[0], (unsigned long)[(NSArray *)params count]);
+                }
+            } @catch (NSException *e) {}
         }
     } @catch (NSException *e) {}
-    %orig(arg1);
+    %orig;
+}
+
+%end
+
+// ── v1.2.21: RohanaSwiftHook —— QQ 自带 Kuikly PB 请求/响应配对框架（头文件 027945 实锤）──
+//    全部签名确定，安全只读记录，不修改任何请求/响应
+%hook RohanaSwiftHook
+
+- (void)handleSSOResponseWithRequestId:(long long)requestId ssoCmd:(id)ssoCmd result:(int)result errMsg:(id)errMsg rspInfo:(id)rspInfo {
+    @try {
+        if (_dumpAllRequests) {
+            qqfbLogSSOReply(@"ROHANA-SSO", ssoCmd, result, errMsg, rspInfo);
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (void)handleOidbResponseWithRequestId:(long long)requestId cmd:(int)cmd result:(int)result errMsg:(id)errMsg rspInfo:(id)rspInfo {
+    @try {
+        if (_dumpAllRequests) {
+            qqfbLogSSOReply(@"ROHANA-OIDB", [NSString stringWithFormat:@"0x%x", cmd], result, errMsg, rspInfo);
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (id)kuiklyResponseFromCallbackResult:(id)result {
+    @try {
+        if (_dumpAllRequests && result) {
+            NSString *out = [NSString stringWithFormat:@"%@", result];
+            if (out.length > 2000) out = [out substringToIndex:2000];
+            qqlog(@"[ROHANA-CB] result=%@", out);
+            if ([result isKindOfClass:[NSData class]]) qqlog(@"[ROHANA-CB-HEX] %@", qqfbHex(result, 4000));
+        }
+    } @catch (NSException *e) {}
+    return %orig;
+}
+
+- (id)overrideResponseForCmd:(id)cmd {
+    @try {
+        if (_dumpAllRequests && cmd) qqlog(@"[ROHANA-OVR] cmd=%@", cmd);
+    } @catch (NSException *e) {}
+    return %orig;
+}
+
+%end
+
+// ── v1.2.21: AIRequestModule —— Kuikly JS 桥的 OIDB 请求/响应分发（头文件 110199 实锤）──
+%hook AIRequestModule
+
+- (void)sendOIDBRequestV2:(id)arg1 {
+    @try {
+        if (_dumpAllRequests && arg1) {
+            NSString *desc = [NSString stringWithFormat:@"%@", arg1];
+            qqlog(@"[AI-OIDB-REQ] %@", desc.length > 800 ? [desc substringToIndex:800] : desc);
+        }
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (void)handleOIDBResponse:(id)arg1 cmd:(id)cmd tag:(id)tag schemaTokens:(id)schemaTokens callback:(id)callback {
+    @try {
+        if (_dumpAllRequests) {
+            NSString *out = arg1 ? [NSString stringWithFormat:@"%@", arg1] : @"nil";
+            if (out.length > 2000) out = [out substringToIndex:2000];
+            qqlog(@"[AI-OIDB-RSP] cmd=%@ tag=%@ response=%@", cmd ?: @"?", tag ?: @"?", out);
+            if ([arg1 isKindOfClass:[NSData class]]) qqlog(@"[AI-OIDB-RSP-HEX] %@", qqfbHex(arg1, 4000));
+        }
+    } @catch (NSException *e) {}
+    %orig;
 }
 
 %end

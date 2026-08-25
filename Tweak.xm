@@ -42,7 +42,14 @@ static BOOL _captureEnabled = NO;
 // ── 仅抓等级关键词（keyTask）时才包装响应；全量模式只记请求不碰响应（防 Kuikly 白屏）──
 static BOOL _captureOnlyTasks = NO;
 // ── v1.2.9: 点击「额外活跃」后 5 秒内无条件记录所有请求 URL+body（锁定33任务真实接口）──
+// v1.2.11: 打开等级页后立即开启 8 秒 DUMP（等级页一打开就拉取全量任务，不需点额外活跃）
 static BOOL _dumpAllRequests = NO;
+
+// ── v1.2.11: AI 对话分析（参考微信插件 wxresearch 对话模式）──
+static NSMutableArray *_aiHistory = nil;   // AI 对话历史（system + user + assistant）
+static BOOL _aiBusy = NO;                  // AI 请求进行中（防连点）
+#define QQFB_AI_KEY_UD @"qqfb_ai_key"      // NSUserDefaults 存 key（留空用户自己填）
+#define QQFB_AI_MODEL @"deepseek-chat"
 
 // ── 一键任务执行状态 ──
 static BOOL _taskRunning = NO;
@@ -1580,36 +1587,46 @@ static void showTaskPanel(void) {
     _taskScroll = scroll;
     [panel addSubview:scroll];
 
-    // 底部按钮区（v1.2.0: 获取任务 / 执行勾选 / 打开等级页）
+    // 底部按钮区（v1.2.0: 获取任务 / 执行勾选 / 打开等级页；v1.2.11: +AI 对话）
     CGFloat by = h - 128;
-    CGFloat btnW = (w - 30 - 8) / 3.0;
+    CGFloat btnW = (w - 30 - 12) / 4.0;
     UIButton *refreshBtn2 = [UIButton buttonWithType:UIButtonTypeCustom];
     refreshBtn2.frame = CGRectMake(10, by, btnW, 34);
     refreshBtn2.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.85];
     refreshBtn2.layer.cornerRadius = 8;
     [refreshBtn2 setTitle:@"🔄 获取" forState:UIControlStateNormal];
     [refreshBtn2 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    refreshBtn2.titleLabel.font = [UIFont systemFontOfSize:12];
+    refreshBtn2.titleLabel.font = [UIFont systemFontOfSize:11];
     [refreshBtn2 addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:refreshBtn2];
 
     UIButton *execBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    execBtn.frame = CGRectMake(14 + btnW, by, btnW, 34);
+    execBtn.frame = CGRectMake(12 + btnW, by, btnW, 34);
     execBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
     execBtn.layer.cornerRadius = 8;
     [execBtn setTitle:@"▶ 执行" forState:UIControlStateNormal];
     [execBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    execBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    execBtn.titleLabel.font = [UIFont systemFontOfSize:11];
     [execBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskExecCheckedTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:execBtn];
 
+    UIButton *aiBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    aiBtn.frame = CGRectMake(14 + btnW * 2, by, btnW, 34);
+    aiBtn.backgroundColor = [[UIColor systemPurpleColor] colorWithAlphaComponent:0.85];
+    aiBtn.layer.cornerRadius = 8;
+    [aiBtn setTitle:@"🤖 AI" forState:UIControlStateNormal];
+    [aiBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    aiBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    [aiBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskAITapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:aiBtn];
+
     UIButton *lvBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    lvBtn.frame = CGRectMake(18 + btnW * 2, by, btnW, 34);
+    lvBtn.frame = CGRectMake(16 + btnW * 3, by, btnW, 34);
     lvBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
     lvBtn.layer.cornerRadius = 8;
     [lvBtn setTitle:@"🌐 等级页" forState:UIControlStateNormal];
     [lvBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    lvBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    lvBtn.titleLabel.font = [UIFont systemFontOfSize:11];
     [lvBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:lvBtn];
 
@@ -1629,6 +1646,104 @@ static void showTaskPanel(void) {
     [_floatWindow addSubview:panel];
     // 首次打开自动拉列表
     refreshTaskListUI();
+}
+
+// ══════════════════════════════════════════
+//  AI 对话分析（v1.2.11，参考微信插件 wxresearch 对话模式）
+//  用途：把当前任务列表/抓包数据打包发给 DeepSeek，分析每个任务怎么做
+//  key 留空（QQFB_AI_KEY_UD 存 NSUserDefaults），用户在面板「🤖AI」里自己填
+// ══════════════════════════════════════════
+static NSString *qqfbAIRequest(NSArray *messages, int timeoutSec) {
+    NSString *apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:QQFB_AI_KEY_UD];
+    if (!apiKey || ![apiKey length]) return nil;
+    NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+    payload[@"model"] = QQFB_AI_MODEL;
+    payload[@"messages"] = messages;
+    payload[@"temperature"] = @(0.7);
+    payload[@"max_tokens"] = @(4096);
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!bodyData) return nil;
+    NSURL *url = [NSURL URLWithString:@"https://api.deepseek.com/chat/completions"];
+    NSMutableURLRequest *req = [[NSMutableURLRequest alloc] initWithURL:url];
+    [req setHTTPMethod:@"POST"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
+    [req setHTTPBody:bodyData];
+    [req setTimeoutInterval:timeoutSec];
+    NSHTTPURLResponse *resp = nil;
+    NSError *err = nil;
+    NSData *respData = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
+    qqlog(@"[AI] resp status=%ld len=%lu err=%@", (long)resp.statusCode, (unsigned long)respData.length, err);
+    if (err || !respData) return nil;
+    if (resp.statusCode != 200) return nil;
+    return [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding];
+}
+
+static NSString *qqfbAIExtractContent(NSString *jsonStr) {
+    if (!jsonStr) return nil;
+    NSData *data = [jsonStr dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (!obj) return nil;
+    NSArray *choices = obj[@"choices"];
+    if (![choices count]) return nil;
+    return choices[0][@"message"][@"content"];
+}
+
+// 把任务列表打包成文本给 AI 分析
+static NSString *taskListToAIText(NSArray *tasks) {
+    if (!tasks || !tasks.count) return @"（当前无任务数据，请先点「🔄获取」或打开等级页抓包）";
+    NSMutableString *s = [NSMutableString string];
+    for (NSDictionary *t in tasks) {
+        NSString *title = t[@"title"] ?: @"";
+        id days = t[@"accelerate_days"];
+        NSString *jump = t[@"jump_schema"] ?: @"";
+        NSString *status = [t[@"status"] intValue] == 1 ? @"已完成" : ([t[@"status"] intValue] == 2 ? @"可领取" : @"待完成");
+        [s appendFormat:@"- [%@] %@ (+%@天) status=%@ jump=%@\n",
+         status, title, days ? [NSString stringWithFormat:@"%.1f", [days doubleValue]] : @"?",
+         status, jump];
+    }
+    return s;
+}
+
+// 后台线程调 AI，主线程回调显示（对话模式：自动带历史）
+static void qqfbAIRun(NSString *userQuestion) {
+    if (_aiBusy) { appendLogView(@"🤖 AI 正在分析中，稍等…"); return; }
+    NSString *apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:QQFB_AI_KEY_UD];
+    if (!apiKey || ![apiKey length]) {
+        appendLogView(@"⚠️ 未配置 API key：请先在面板点「🔑Key」填写（留空无法调用）");
+        return;
+    }
+    _aiBusy = YES;
+    appendLogView(@"🤖 AI 思考中…");
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @autoreleasepool {
+            // 组装 system 提示（任务数据 + 抓包现状 + 让 AI 分析每个任务怎么做）
+            NSMutableArray *messages = [NSMutableArray array];
+            NSMutableString *sysPrompt = [NSMutableString string];
+            [sysPrompt appendString:@"你是 QQ 等级加速任务自动化助手。用户手机装了 QQ 悬浮球插件，插件能抓取等级页任务数据并调用部分后台接口。\n"];
+            [sysPrompt appendString:@"以下是当前抓到的任务列表（title=任务名, jump=跳转深链/页面）：\n"];
+            [sysPrompt appendString:taskListToAIText(_taskListCache ?: _capturedTaskList)];
+            [sysPrompt appendString:@"\n请分析：1) 每个任务怎么做（跳转什么页面/调什么接口） 2) 哪些能自动完成、哪些只能跳页面 3) 给出按顺序执行的建议。用中文，条理清晰。"];
+            [messages addObject:@{@"role": @"system", @"content": sysPrompt}];
+            // 已有历史则带历史（对话模式）
+            for (NSDictionary *m in _aiHistory) [messages addObject:m];
+            [messages addObject:@{@"role": @"user", @"content": userQuestion}];
+
+            NSString *jsonStr = qqfbAIRequest(messages, 60);
+            NSString *reply = qqfbAIExtractContent(jsonStr);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                _aiBusy = NO;
+                if (!reply) {
+                    appendLogView(@"❌ AI 调用失败（检查 key 是否正确 / 网络）");
+                    return;
+                }
+                if (!_aiHistory) _aiHistory = [NSMutableArray array];
+                [_aiHistory addObject:@{@"role": @"user", @"content": userQuestion}];
+                [_aiHistory addObject:@{@"role": @"assistant", @"content": reply}];
+                appendLogView([NSString stringWithFormat:@"🤖 AI：%@", reply]);
+            });
+        }
+    });
 }
 
 // ══════════════════════════════════════════
@@ -1773,11 +1888,72 @@ __attribute__((unused)) static void showLogPanel(void) {
 }
 
 %new
+- (void)_taskAITapped:(UIButton *)sender {
+    // v1.2.11: AI 对话分析——首次点弹窗填 key（留空用户自己填），再点分析当前任务
+    NSString *apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:QQFB_AI_KEY_UD];
+    if (!apiKey || ![apiKey length]) {
+        // 无 key：弹窗输入
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"配置 DeepSeek API Key"
+                                                                    message:@"填一次即可（存本机），key 留空无法调用 AI"
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+        [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"sk-...";
+            tf.secureTextEntry = YES;
+        }];
+        [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            NSString *k = [ac.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (k.length) {
+                [[NSUserDefaults standardUserDefaults] setObject:k forKey:QQFB_AI_KEY_UD];
+                appendLogView(@"✅ API key 已保存，点「🤖 AI」开始分析");
+            } else {
+                appendLogView(@"⚠️ key 为空，未保存");
+            }
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        UIViewController *top = [[UIApplication sharedApplication] keyWindow].rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+        [top presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+    // 有 key：清空历史后开始分析当前任务
+    _aiHistory = [NSMutableArray array];
+    qqfbAIRun(@"分析当前任务列表：每个任务怎么做、哪些能自动完成，给出执行建议");
+}
+
+%new
+- (void)_taskKeyTapped:(UIButton *)sender {
+    // 换 key / 查看当前 key 状态
+    NSString *apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:QQFB_AI_KEY_UD];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"DeepSeek API Key"
+                                                                message:apiKey.length ? [NSString stringWithFormat:@"当前已配置（…%@）", [apiKey substringFromIndex:MAX(0, (NSInteger)apiKey.length - 4)]] : @"当前未配置"
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"sk-...";
+        tf.text = apiKey ?: @"";
+        tf.secureTextEntry = YES;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *k = [ac.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (k.length) {
+            [[NSUserDefaults standardUserDefaults] setObject:k forKey:QQFB_AI_KEY_UD];
+            appendLogView(@"✅ API key 已更新");
+        } else {
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:QQFB_AI_KEY_UD];
+            appendLogView(@"⚠️ key 已清空");
+        }
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    UIViewController *top = [[UIApplication sharedApplication] keyWindow].rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    [top presentViewController:ac animated:YES completion:nil];
+}
+
+%new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
     if (_autoFlowRunning) return;   // v1.2.8: 流程互斥,防止重复触发
     _autoFlowRunning = YES;
-    appendLogView(@"[自动流程] 等级页→额外活跃→获取任务 (v1.2.10)");
-    qqlog(@"[action] 打开等级页(自动流程 v1.2.10)");
+    appendLogView(@"[自动流程] 等级页→额外活跃→获取任务 (v1.2.11)");
+    qqlog(@"[action] 打开等级页(自动流程 v1.2.11)");
     // 先收起自己的面板(避免悬浮球/面板挡住等级页操作 + findViewWithText 误扫到自己)
     if (_taskPanel) {
         [_taskPanel removeFromSuperview];
@@ -1804,6 +1980,15 @@ __attribute__((unused)) static void showLogPanel(void) {
     }
     [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
     appendLogView(@"① 已拉起等级页，轮询等待渲染(最多8秒)…");
+
+    // v1.2.11: 打开等级页立即开启 8 秒 DUMP——等级页一打开就拉取全量任务列表
+    //          （29任务接口就在这8秒的请求里），不再依赖点「额外活跃」
+    _dumpAllRequests = YES;
+    qqlog(@"[DUMP] 打开等级页 → 8秒全量请求记录开启（锁定29任务真实接口）");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        _dumpAllRequests = NO;
+        qqlog(@"[DUMP] 8秒记录窗口结束");
+    });
 
     // v1.2.9/1.2.10: 轮询等待「额外活跃」出现（Kuikly 远程渲染慢，固定3秒不够）
     //   v1.2.10 实证: Kuikly 视图树无文字节点，findViewWithText 永远找不到→轮询仅作兜底，

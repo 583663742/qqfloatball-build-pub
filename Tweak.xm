@@ -1483,10 +1483,10 @@ static void renderTaskRows(void) {
 // ── 刷新任务列表（拉接口 → 渲染）──
 static void refreshTaskListUI(void) {
     // v1.2.2: 优先用客户端原生捕获的全量任务列表（QQ 自己请求带 skey 全凭证，服务端给全量）
+    // v1.2.12: 不再在日志区提示「使用客户端原生全量」（用户要求静默，捕获信息由 [捕获] 日志记录）
     if (_capturedTaskList && _capturedTaskList.count > 0) {
         _taskListCache = _capturedTaskList;
         if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
-        appendLogView([NSString stringWithFormat:@"✅ 使用客户端原生全量 %lu 个任务", (unsigned long)_capturedTaskList.count]);
         renderTaskRows();
         return;
     }

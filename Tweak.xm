@@ -1233,6 +1233,7 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
+static void runLevelTasksAuto(void);   // v1.2.25 一键执行
 
 // ══════════════════════════════════════════
 //  qsped 式纯后台任务执行器（v1.1.0）
@@ -1531,6 +1532,60 @@ __attribute__((unused)) static void runAutoTasks(void) {
             qqlog(@"[auto] 主流程异常: %@", e);
         }
         _taskRunning = NO;
+    });
+}
+
+
+// ══════════════════════════════════════════
+//  等级任务一键执行（v1.2.25：硬编码 jumpURL 遍历，纯页面停留推进任务）
+//  遍历免费任务 → openJumpSchema 打开 → 停留 N 秒 → 日志记录 → 下一个 → 回等级页
+// ══════════════════════════════════════════
+static NSArray *levelTaskDefs(void) {
+    return @[
+        @{@"title": @"去日签卡打一次卡", @"jump": @"https://ti.qq.com/signin/public/index.html?_wv=1090528161&_wwv=13"},
+        @{@"title": @"每日登录QQ经典农场", @"jump": @"mqqapi://miniapp/open?_atype=1&_mappid=1112386029&_miniapptype=1&_mvid=&_vt=3&via=nc_qqlevel_task&_sig=846276564"},
+        @{@"title": @"去QQ会员福利社领福利券", @"jump": @"https://club.vip.qq.com/transfer?open_kuikly_info=%7B%22bundle_name%22%3A%22vas_qqvip_benefit%22%7D&qqmc_config=vas_kuikly_config&page_name=vas_qqvip_benefit&kr_turbo_display=1&enteranceId&is_test=1&outer_scene_source=1"},
+        @{@"title": @"浏览十条空间好友动态", @"jump": @"mqqapi://qzoneschema/?schema=bXF6b25lOi8vYXJvdXNlL2FjdGl2ZWZlZWQmbG9naW5mcm9tPTYx"},
+        @{@"title": @"看10秒漫剧", @"jump": @"https://club.vip.qq.com/mono/comic/wx-share?_wv=3&min_version=9.3.25&target=mqqapi%3A%2F%2Fcomicvideo%2Fopentab%3Ftabtype%3Drecommend%26task%3Dwatch%26watchTime%3D10%26from%3Ddengji_task"},
+        @{@"title": @"去元宝提问1次", @"jump": @"https://yuanbao.tencent.com/e/evt/dl/6a57a8a7777270f8491d298a?chid=5318&source=imgH5LandingPage&trid=qqhy.zhxxdjjs.app&openid=C6C837A2F1ECB5B91758862B5D622D8A"},
+        @{@"title": @"体验任一款小游戏15s", @"jump": @"mqqapi://kuikly/open?page_name=mini_game_recommend&version=1&src_type=web&bundle_name=qgame_mini_game_third_page&recommend_module_type=12&kr_turbo_display=qqlevel_task&from=qqlevel_task&backend_from=qqlevel_task&kr_min_res_version=1890"},
+        @{@"title": @"完成视频任务获得加速时长", @"jump": @"mqqapi://kuikly/open?page_name=benefits_center&version=1&src_type=web&bundle_name=benefits_center&from=qqgrade"},
+    ];
+}
+
+static BOOL _levelTasksRunning = NO;
+
+// ── 一键遍历执行等级任务（后台线程，主线程开页面）──
+static void runLevelTasksAuto(void) {
+    if (_levelTasksRunning) {
+        appendLogView(@"⚠️ 任务已在执行中，请勿重复点击");
+        return;
+    }
+    _levelTasksRunning = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSArray *tasks = levelTaskDefs();
+        appendLogView([NSString stringWithFormat:@"🚀 开始执行 %lu 个等级任务", (unsigned long)tasks.count]);
+        int idx = 0;
+        for (NSDictionary *task in tasks) {
+            idx++;
+            NSString *title = task[@"title"] ?: @"?";
+            NSString *jump = task[@"jump"] ?: @"";
+            appendLogView([NSString stringWithFormat:@"── [%d/%lu] 正在做：%@", idx, (unsigned long)tasks.count, title]);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                openJumpSchema(jump);
+            });
+            // 页面加载后注入 JS 自动点击（3 轮，间隔 5 秒），再停留
+            for (int round = 0; round < 3; round++) {
+                [NSThread sleepForTimeInterval:5];
+                autoTapAllWebViews();
+            }
+            appendLogView([NSString stringWithFormat:@"✓ [%d/%lu] %@ 已停留完成", idx, (unsigned long)tasks.count, title]);
+        }
+        appendLogView(@"🎉 全部任务已遍历完成，返回等级页查看进度");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            openLevelPage();
+        });
+        _levelTasksRunning = NO;
     });
 }
 
@@ -1839,8 +1894,19 @@ static void showTaskPanel(void) {
     [closeBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:closeBtn];
 
+    // v1.2.25: 一键做任务按钮（整行，遍历免费任务自动打开停留）
+    UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    runBtn.frame = CGRectMake(6, 38, w - 12, 30);
+    [runBtn setTitle:@"🚀 一键做任务（自动遍历免费任务）" forState:UIControlStateNormal];
+    [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
+    runBtn.layer.cornerRadius = 6;
+    runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:runBtn];
+
     // 日志区：不内置安卓任务列表、不执行任务；页面抓到什么就显示什么。
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 44, w - 12, h - 50)];
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 72, w - 12, h - 78)];
     tv.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1];
     tv.layer.cornerRadius = 6;
     tv.textColor = [UIColor whiteColor];
@@ -2015,6 +2081,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskExecCheckedTapped:(UIButton *)sender;
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender;
 - (void)_taskCaptureTapped:(UIButton *)sender;
+- (void)_taskRunLevelTapped:(UIButton *)sender;
 @end
 
 %hook UIApplication
@@ -2196,6 +2263,13 @@ __attribute__((unused)) static void showLogPanel(void) {
     appendLogView(@"[iOS抓取] 开始只读记录（响应驱动自动停止）");
     qqlog(@"[iOS抓取] 开始只读记录（响应驱动自动停止）");
     qqfbScheduleAutoStop();
+}
+
+%new
+- (void)_taskRunLevelTapped:(UIButton *)sender {
+    // v1.2.25: 一键遍历免费等级任务，逐个打开页面停留 + JS 自动点击
+    appendLogView(@"🚀 一键做任务：开始遍历免费任务…");
+    runLevelTasksAuto();
 }
 
 %new

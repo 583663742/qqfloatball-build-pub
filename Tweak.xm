@@ -1235,6 +1235,34 @@ static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 
 // ══════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  内置免费任务清单（方案A · 离线兜底）
+//  来源：0x9172 pbBody 抓包实锤（2026-08-23，jumpURL 已验证）
+//  用途：iOS 上在线 levelTask/Get 接口返回空/任务极少时，
+//        runAutoTasks 回退到本清单，逐条 openJumpSchema 跳转执行。
+//  跳过规则：充值开通/包月/年费(打钱)、已结束、听歌(第三方QQ音乐,留手动)、
+//        会员活动页(act.qzone vip/tx/p)、买断/黑金/炫彩靓号。
+// ══════════════════════════════════════════════════════════════
+static NSArray *builtInTasks(void) {
+    return @[
+        @{@"title": @"加一位好友", @"jump": @"mqqapi://contact/add?src_type=web&version=1&des_type=0"},
+        @{@"title": @"发布一条空间说说", @"jump": @"mqqapi://qzoneschema/?schema=bXF6b25lOi8vYXJvdXNlL3dyaXRlbW9vZD9hZElkPXFxX2xldmVsX3NodW9zaHVvJmxvZ2luZnJvbT02MQ=="},
+        @{@"title": @"去日签卡打一次卡", @"jump": @"https://ti.qq.com/signin/public/index.html?_wv=1090528161&_wwv=13"},
+        @{@"title": @"去免费小说看任一本书", @"jump": @"mqqapi://kuikly/open?version=1&src_type=web&bundle_name=vas_qqvip_novel_book_store&qqmc_config=vas_kuikly_config&page_name=vas_qqvip_novel_book_store&from=dengji_task&custom_back_pressed=1"},
+        @{@"title": @"每日登录QQ经典农场", @"jump": @"mqqapi://miniapp/open?_atype=1&_mappid=1112386029&_miniapptype=1&_mvid=&_vt=3&via=nc_qqlevel_task&_sig=846276564"},
+        @{@"title": @"去QQ会员福利社领福利券", @"jump": @"https://club.vip.qq.com/transfer?open_kuikly_info=%7B%22bundle_name%22%3A%22vas_qqvip_benefit%22%7D&qqmc_config=vas_kuikly_config&page_name=vas_qqvip_benefit&kr_turbo_display=1&enteranceId&is_test=1&outer_scene_source=1"},
+        @{@"title": @"完成视频任务获得加速时长", @"jump": @"mqqapi://kuikly/open?page_name=benefits_center&version=1&src_type=web&bundle_name=benefits_center&from=qqgrade"},
+        @{@"title": @"体验任一款小游戏15s", @"jump": @"mqqapi://kuikly/open?page_name=mini_game_recommend&version=1&src_type=web&bundle_name=qgame_mini_game_third_page&recommend_module_type=12&kr_turbo_display=qqlevel_task&from=qqlevel_task&backend_from=qqlevel_task&kr_min_res_version=1890"},
+        @{@"title": @"浏览十条空间好友动态", @"jump": @"mqqapi://qzoneschema/?schema=bXF6b25lOi8vYXJvdXNlL2FjdGl2ZWZlZWQmbG9naW5mcm9tPTYx"},
+        @{@"title": @"参与盲盒签并成功发布至空间", @"jump": @"https://h5.tu.qq.com/stable/daily-check-in/index.html?_wv=2&root_channel=qiandao&currentchannel=dengjirenwu&current_channel=dengjirenwu&jump2App=1&_loading=1&loginfrom=66"},
+        @{@"title": @"SVIP712会员节礼包加速", @"jump": @"https://club.vip.qq.com/openKuikly/vas_vip_fest_2026?open_kuikly_info=%7B%22bundle_name%22%3A%22vas_vip_fest_2026%22%7D&qqmc_config=vas_kuikly_config&page_name=vas_vip_fest_2026&kr_turbo_display=1&bottom_nav_bar_immersive=1&enteranceId=xtsrw&_wv=16777216"},
+        @{@"title": @"创建小游戏擂台并取得成绩", @"jump": @"mqqapi://kuikly/open?page_name=mini_game_arena_rank&bundle_name=mini_game_arena_rank&version=1&src_type=web&kr_turbo_display=1&use_host_display_metrics=1&from=qqlevel_task&kr_min_res_version=610"},
+        @{@"title": @"看10秒漫剧", @"jump": @"https://club.vip.qq.com/mono/comic/wx-share?_wv=3&min_version=9.3.25&target=mqqapi%3A%2F%2Fcomicvideo%2Fopentab%3Ftabtype%3Drecommend%26task%3Dwatch%26watchTime%3D10%26from%3Ddengji_task"},
+        @{@"title": @"去元宝提问1次", @"jump": @"https://yuanbao.tencent.com/e/evt/dl/6a57a8a7777270f8491d298a?chid=5318&source=imgH5LandingPage&trid=qqhy.zhxxdjjs.app&openid=C6C837A2F1ECB5B91758862B5D622D8A"},
+    ];
+}
+
+
 //  qsped 式纯后台任务执行器（v1.1.0）
 //  接口来自 qsped 运行时抓包实锤（D:/android-build/qsped_rerun.log）
 //  全部直接 POST，零页面点击，防封防检测
@@ -1442,10 +1470,18 @@ __attribute__((unused)) static void runAutoTasks(void) {
             // ══ ② 拉任务列表 ══
             int retCode = 0;
             NSArray *taskList = fetchTaskList(uin, tiPskey, &retCode);
+            BOOL useBuiltIn = NO;
             if (!taskList || taskList.count == 0) {
-                qqlog(@"[auto] ✗ 任务列表为空 (ret=%d)", retCode);
-                _taskRunning = NO;
-                return;
+                qqlog(@"[auto] ✗ 在线任务列表为空 (ret=%d)，回退内置免费任务清单", retCode);
+                taskList = builtInTasks();
+                useBuiltIn = YES;
+            } else if (taskList.count < 3) {
+                qqlog(@"[auto] ⚠ 在线任务仅 %lu 条，过少，回退内置免费任务清单", (unsigned long)taskList.count);
+                taskList = builtInTasks();
+                useBuiltIn = YES;
+            }
+            if (useBuiltIn) {
+                qqlog(@"[auto] 使用内置清单 %lu 条（iOS 在线接口拿不到，方案A兜底）", (unsigned long)taskList.count);
             }
 
             // ══ ③ 分类：未做且能做的任务（按原始顺序）══

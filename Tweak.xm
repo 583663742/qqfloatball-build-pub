@@ -1379,7 +1379,7 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
-static void runLevelTasksAuto(void);   // v1.2.25 一键执行
+static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 
 // ══════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════
@@ -1738,6 +1738,7 @@ static NSArray *levelTaskDefs(void) {
 static BOOL _levelTasksRunning = NO;
 
 // ── 一键遍历执行等级任务（后台线程，主线程开页面）──
+static void runLevelTasksAuto(void) __attribute__((unused));
 static void runLevelTasksAuto(void) {
     if (_levelTasksRunning) {
         appendLogView(@"⚠️ 任务已在执行中，请勿重复点击");

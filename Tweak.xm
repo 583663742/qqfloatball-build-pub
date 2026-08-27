@@ -1819,6 +1819,7 @@ static BOOL qqfbWaitStatusRefresh(double oldTs, int timeoutSec) {
 }
 
 // ── 按 taskId 或 title 在任务列表找 status（-1=找不到）──
+static int qqfbFindTaskStatusIn(NSArray *tasks, NSString *taskId, NSString *title) __attribute__((unused));
 static int qqfbFindTaskStatusIn(NSArray *tasks, NSString *taskId, NSString *title) {
     for (NSDictionary *t in tasks) {
         if (![t isKindOfClass:[NSDictionary class]]) continue;

@@ -472,6 +472,143 @@ __attribute__((unused)) static NSString *qqfbHex(NSData *data, NSUInteger maxLen
     return s;
 }
 
+// ══════════════════════════════════════════════════════════════
+//  v1.3-test: 0x9172 任务状态解析（闭环验证 · 只读不改）
+//  目标：把 sendPbRequest 捕获的 0x9172 pbBody 解析成结构化任务，
+//        写入 Documents/qqtask_status.json，面板「刷新任务状态」可查看。
+//  字段映射（真机抓包 hex 离线实锤，2026-08-27）：
+//    field1=title  field2=desc  field3=iconURL  field4=按钮文案
+//    field5=jumpURL  field20=taskId
+//    status 由按钮文案推导：已完成/已领取/已打卡=1；已结束=2；其它=0
+// ══════════════════════════════════════════════════════════════
+static NSString *qqtaskStatusPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqtask_status.json"];
+}
+
+// varint 读取（带边界检查，防越界崩溃）；成功 YES 并前移 *pi
+static BOOL pbReadVarint(const uint8_t *b, NSUInteger len, NSUInteger *pi, uint64_t *out) {
+    uint64_t v = 0; int shift = 0; NSUInteger i = *pi;
+    while (i < len) {
+        uint8_t x = b[i++];
+        v |= (uint64_t)(x & 0x7f) << shift;
+        if (!(x & 0x80)) { *pi = i; *out = v; return YES; }
+        shift += 7;
+        if (shift > 63) return NO;
+    }
+    return NO;
+}
+
+// 判定字节段是否可读 UTF-8 文本（>70% 可打印）
+static NSString *pbTryUTF8(const uint8_t *b, NSUInteger off, NSUInteger n) {
+    if (n == 0) return nil;
+    NSData *d = [NSData dataWithBytes:(b + off) length:n];
+    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!s || s.length == 0) return nil;
+    NSUInteger printable = 0;
+    for (NSUInteger k = 0; k < s.length; k++) {
+        unichar c = [s characterAtIndex:k];
+        if (c >= 0x20 || c == '\n' || c == '\t' || c == '\r') printable++;
+    }
+    if ((double)printable / (double)s.length > 0.7) return s;
+    return nil;
+}
+
+// 递归遍历 protobuf message，命中任务节点(title+http图标+按钮文案)则收集
+static void pbScanTasks(const uint8_t *b, NSUInteger len, NSMutableArray *outTasks, int depth) {
+    if (depth > 8 || len == 0) return;   // 防深递归
+    NSMutableDictionary *fs = [NSMutableDictionary dictionary];
+    NSMutableArray *subMsgs = [NSMutableArray array];   // 嵌套子消息 [off,len]
+    NSUInteger i = 0;
+    while (i < len) {
+        uint64_t tag;
+        if (!pbReadVarint(b, len, &i, &tag)) break;
+        uint64_t field = tag >> 3; int wtype = (int)(tag & 7);
+        if (wtype == 0) {
+            uint64_t v;
+            if (!pbReadVarint(b, len, &i, &v)) break;
+            if (!fs[@(field)]) fs[@(field)] = @{@"t": @"v", @"v": @(v)};
+        } else if (wtype == 2) {
+            uint64_t ln;
+            if (!pbReadVarint(b, len, &i, &ln)) break;
+            if (i + (NSUInteger)ln > len) break;   // 越界保护
+            NSString *s = pbTryUTF8(b, i, (NSUInteger)ln);
+            if (s) {
+                if (!fs[@(field)]) fs[@(field)] = @{@"t": @"s", @"s": s};
+            } else if (ln > 1) {
+                [subMsgs addObject:@[@(i), @(ln)]];
+            }
+            i += (NSUInteger)ln;
+        } else if (wtype == 5) { i += 4; }
+        else if (wtype == 1) { i += 8; }
+        else break;
+    }
+    // 任务节点判定：field1(title,str) + field3(iconURL,http) + field4(按钮文案,str)
+    NSDictionary *f1 = fs[@1], *f3 = fs[@3], *f4 = fs[@4];
+    if (f1 && [f1[@"t"] isEqualToString:@"s"] &&
+        f4 && [f4[@"t"] isEqualToString:@"s"] &&
+        f3 && [f3[@"t"] isEqualToString:@"s"] && [f3[@"s"] hasPrefix:@"http"]) {
+        NSString *title = f1[@"s"];
+        NSString *btn   = f4[@"s"];
+        NSString *desc  = (fs[@2] && [fs[@2][@"t"] isEqualToString:@"s"]) ? fs[@2][@"s"] : @"";
+        NSString *jump  = (fs[@5] && [fs[@5][@"t"] isEqualToString:@"s"]) ? fs[@5][@"s"] : @"";
+        NSString *taskId = @"";
+        if (fs[@20] && [fs[@20][@"t"] isEqualToString:@"v"]) taskId = [NSString stringWithFormat:@"%@", fs[@20][@"v"]];
+        int st = 0;
+        if ([btn isEqualToString:@"已完成"] || [btn isEqualToString:@"已领取"] || [btn isEqualToString:@"已打卡"]) st = 1;
+        else if ([btn isEqualToString:@"已结束"]) st = 2;
+        [outTasks addObject:@{
+            @"taskId": taskId,
+            @"title": title ?: @"",
+            @"desc": desc ?: @"",
+            @"jumpURL": jump ?: @"",
+            @"button": btn ?: @"",
+            @"status": @(st)
+        }];
+    }
+    for (NSArray *pair in subMsgs) {
+        NSUInteger off = [pair[0] unsignedIntegerValue];
+        NSUInteger n = [pair[1] unsignedIntegerValue];
+        pbScanTasks(b + off, n, outTasks, depth + 1);
+    }
+}
+
+// 解析 0x9172 pbBody → 写 qqtask_status.json，返回任务数（失败返回 -1）
+static int qqfbParse9172AndSave(NSData *pbBody) {
+    @try {
+        if (![pbBody isKindOfClass:[NSData class]] || pbBody.length == 0) {
+            qqlog(@"[9172-PARSE] pbBody 为空");
+            return -1;
+        }
+        NSMutableArray *tasks = [NSMutableArray array];
+        pbScanTasks((const uint8_t *)pbBody.bytes, pbBody.length, tasks, 0);
+        if (tasks.count == 0) {
+            // 解析失败：dump 前 200 字节 hex 供排查
+            qqlog(@"[9172-PARSE] 解析任务=0，原始前200B hex=%@", qqfbHex(pbBody, 200));
+            return 0;
+        }
+        NSDictionary *root = @{
+            @"capturedAt": @([[NSDate date] timeIntervalSince1970]),
+            @"cmd": @"OidbSvcTrpcTcp.0x9172_0",
+            @"pbBodyLen": @(pbBody.length),
+            @"taskCount": @(tasks.count),
+            @"tasks": tasks
+        };
+        NSError *err = nil;
+        NSData *json = [NSJSONSerialization dataWithJSONObject:root
+                        options:(NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys) error:&err];
+        if (!json) {
+            qqlog(@"[9172-PARSE] JSON 序列化失败: %@", err);
+            return -1;
+        }
+        [json writeToFile:qqtaskStatusPath() atomically:YES];
+        qqlog(@"[9172-PARSE] 已解析 %lu 个任务 → %@", (unsigned long)tasks.count, qqtaskStatusPath());
+        return (int)tasks.count;
+    } @catch (NSException *e) {
+        qqlog(@"[9172-PARSE] 异常 %@", e);
+        return -1;
+    }
+}
+
 static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id rspInfo) {
     @try {
         NSString *cmdStr = [cmd isKindOfClass:[NSString class]] ? cmd
@@ -666,6 +803,11 @@ static void qqfbLogSSOReply(NSString *channel, id cmd, int result, id errMsg, id
                                                     qqlog(@"[KUILKY-PB-RSP] cmd=%@ dataLen=%lu dataHex=%@",
                                                           bCmd, (unsigned long)[(NSData *)payload length],
                                                           qqfbHex((NSData *)payload, 60000));
+                                                    // v1.3-test: 命中 0x9172 → 解析任务状态写 JSON（只读，不改请求/响应）
+                                                    if ([bCmd rangeOfString:@"0x9172"].location != NSNotFound) {
+                                                        int n = qqfbParse9172AndSave((NSData *)payload);
+                                                        appendLogView([NSString stringWithFormat:@"📊 0x9172 任务状态已更新：%d 个任务", n]);
+                                                    }
                                                 } else {
                                                     NSString *rd = [NSString stringWithFormat:@"%@", payload];
                                                     qqlog(@"[KUILKY-PB-RSP] cmd=%@ result=%@",
@@ -1889,7 +2031,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.3-test";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -1932,14 +2074,25 @@ static void showTaskPanel(void) {
 
     // v1.2.25: 一键做任务按钮（整行，遍历免费任务自动打开停留）
     UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    runBtn.frame = CGRectMake(6, 38, w - 12, 30);
-    [runBtn setTitle:@"🚀 一键做任务（自动遍历免费任务）" forState:UIControlStateNormal];
+    runBtn.frame = CGRectMake(6, 38, (w - 18) / 2, 30);
+    [runBtn setTitle:@"🚀 一键做任务" forState:UIControlStateNormal];
     [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
     runBtn.layer.cornerRadius = 6;
     runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
     [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:runBtn];
+
+    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）
+    UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    statusBtn.frame = CGRectMake(6 + (w - 18) / 2 + 6, 38, (w - 18) / 2, 30);
+    [statusBtn setTitle:@"📊 刷新任务状态" forState:UIControlStateNormal];
+    [statusBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    statusBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
+    statusBtn.layer.cornerRadius = 6;
+    statusBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    [statusBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshStatusTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:statusBtn];
 
     // 日志区：不内置安卓任务列表、不执行任务；页面抓到什么就显示什么。
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 72, w - 12, h - 78)];
@@ -2118,6 +2271,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender;
 - (void)_taskCaptureTapped:(UIButton *)sender;
 - (void)_taskRunLevelTapped:(UIButton *)sender;
+- (void)_taskRefreshStatusTapped:(UIButton *)sender;
 @end
 
 %hook UIApplication
@@ -2185,6 +2339,49 @@ __attribute__((unused)) static void showLogPanel(void) {
 %new
 - (void)_taskRefreshTapped:(UIButton *)sender {
     refreshTaskListUI();
+}
+
+%new
+- (void)_taskRefreshStatusTapped:(UIButton *)sender {
+    // v1.3-test: 读取 Documents/qqtask_status.json，把 0x9172 解析出的任务状态显示到日志区
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqtask_status.json"];
+    NSData *jd = [NSData dataWithContentsOfFile:path];
+    if (!jd || jd.length == 0) {
+        appendLogView(@"📊 还没有任务状态数据：请先「打开并抓取」进入等级页，等捕获到 0x9172 后再刷新");
+        return;
+    }
+    @try {
+        NSError *err = nil;
+        NSDictionary *root = [NSJSONSerialization JSONObjectWithData:jd options:0 error:&err];
+        if (![root isKindOfClass:[NSDictionary class]]) {
+            appendLogView([NSString stringWithFormat:@"📊 状态文件解析失败：%@", err]);
+            return;
+        }
+        NSArray *tasks = root[@"tasks"];
+        NSNumber *cnt = root[@"taskCount"];
+        NSNumber *ts = root[@"capturedAt"];
+        NSString *when = @"";
+        if ([ts isKindOfClass:[NSNumber class]]) {
+            NSDate *d = [NSDate dateWithTimeIntervalSince1970:[ts doubleValue]];
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"HH:mm:ss";
+            when = [df stringFromDate:d];
+        }
+        int doneN = 0, endN = 0, todoN = 0;
+        for (NSDictionary *t in tasks) {
+            int st = [t[@"status"] intValue];
+            if (st == 1) doneN++; else if (st == 2) endN++; else todoN++;
+        }
+        appendLogView([NSString stringWithFormat:@"📊 ── 任务状态（抓取于 %@，共 %@ 个）──", when, cnt ?: @0]);
+        appendLogView([NSString stringWithFormat:@"   ✅已完成 %d ｜ ⏳待完成 %d ｜ 🔒已结束 %d", doneN, todoN, endN]);
+        for (NSDictionary *t in tasks) {
+            int st = [t[@"status"] intValue];
+            NSString *flag = (st == 1) ? @"✅" : (st == 2) ? @"🔒" : @"⏳";
+            appendLogView([NSString stringWithFormat:@"%@ %@（%@）", flag, t[@"title"] ?: @"?", t[@"button"] ?: @""]);
+        }
+    } @catch (NSException *e) {
+        appendLogView([NSString stringWithFormat:@"📊 显示异常：%@", e]);
+    }
 }
 
 %new

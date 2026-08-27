@@ -1,0 +1,289 @@
+========================================================================
+QQ 自动任务插件（QQFloatBall）· 完整技术总结
+用途：交给 ChatGPT 参考，请其对「v2.0 架构」给出建议
+生成时间：2026-08-27
+========================================================================
+
+【运行环境】
+- 设备：iPhone / iOS 16.2
+- 越狱：Dopamine + RootHide
+- 已开启 SSH（通过 Tailscale 远程装机，节点 100.84.151.126）
+- 目标 App：手机 QQ 9.3.35（Bundle: com.tencent.mqq / com.tencent.mobileqq）
+- 当前插件版本：v1.2.25
+- 代码本体：单文件 Tweak.xm（2752 行）
+
+========================================================================
+一、项目现状
+========================================================================
+
+1. 技术栈
+- 开发框架：Theos + Logos（.xm 文件）
+- 语言：Objective-C++（ObjC + C 函数混编），无 Python/Swift
+- 注入方式：MobileSubstrate / ElleKit 动态库注入（.dylib + .plist Filter）
+- 目标架构：iphoneos-arm64e（roothide）
+- 打包：.deb（手打 ar 包，非 FINALPACKAGE）
+- 构建：GitHub Actions macOS runner（公共仓 qqfloatball-build-pub）+ Windows 本地手打兜底
+- 签名：ldid（默认，非 TARGET_CODESIGN）
+- 装机：Tailscale SSH → dpkg -i → kill -9 QQ 重启
+
+一句话：纯原生 iOS 越狱 Tweak，全部逻辑在一个 Tweak.xm 里。
+
+2. 已实现功能
+(1) 顶层悬浮球（独立 UIWindow，windowLevel=StatusBar+10，可拖拽，hitTest 精确穿透——只有球体/面板区域响应，其余全透传给 QQ）
+(2) 任务面板 UI（点球弹出，替代系统 alert，含任务列表滚动区 + 勾选框 + 实时日志文本区）
+(3) 实时任务日志（qqlog 双写：App 沙盒 Documents/qqflog.txt + 面板内 UITextView 滚动显示）
+(4) 网络抓包（多入口 hook，默认关闭，防封）
+(5) 一键遍历免费任务（runLevelTasksAuto，v1.2.25 核心）
+(6) WKWebView JS 自动点击（autoTapAllWebViews，动态注入 JS 点“签到/领取/完成”按钮）
+(7) HTTP 直连执行器（fetchTaskList / execActClaim / 加好友/删好友/签到等，已写但当前禁用）
+(8) AI 对话分析（qqfbAIRun，接 deepseek-chat，分析任务列表，默认无 key）
+
+3. 当前能自动完成的任务（一键执行遍历以下 8 条硬编码任务 levelTaskDefs）
+方式：逐个打开跳转页 + 停留约 15 秒 + 3 轮 JS 自动点击
+  1) 去日签卡打一次卡            → ti.qq.com/signin h5
+  2) 每日登录QQ经典农场          → mqqapi://miniapp 小程序
+  3) 去QQ会员福利社领福利券       → club.vip.qq.com Kuikly
+  4) 浏览十条空间好友动态         → mqqapi://qzoneschema
+  5) 看10秒漫剧                  → club.vip.qq.com/mono/comic
+  6) 去元宝提问1次               → yuanbao.tencent.com h5
+  7) 体验任一款小游戏15s         → mqqapi://kuikly 小游戏
+  8) 完成视频任务获得加速时长     → mqqapi://kuikly benefits_center
+
+能可靠推进的：靠“打开页面 + 停留时长”就能完成的任务（漫剧看10秒、浏览动态、小游戏体验、视频任务、农场登录）——只要页面停够时间，服务端自然判定完成。
+
+4. 哪些任务失败 / 不可靠
+- 需要真实交互的：日签卡打卡、福利社领券——JS 关键词点击命中率低（Kuikly 页面不是标准 DOM）
+- 元宝提问：需真实输入问题，纯停留无效
+- HTTP 直连领奖（ExecAct）：历史返回 -5001 参数错位，已废弃禁用
+- 加好友/发说说（qsped 式后台直连）：测试机器人号仍是占位 10001，未实测通过
+- 状态判断全部失败：插件无法知道任何一个任务到底完成没有（最大问题，见第五节）
+
+========================================================================
+二、QQ 任务分析（5 类）
+========================================================================
+
+A. 停留型任务（浏览/视频/漫剧/小游戏体验）
+   - 进入：openJumpSchema() 用 mqqapi:// 深链或 base64 包装的 h5 链接，在 QQ 内部 WebView 打开
+   - 触发：无需操作，页面加载后自然计时
+   - 判断完成：❌ 插件无法判断，只能“停留 15 秒”盲赌；真实完成信号在服务端 0x9172 响应里，插件没读
+
+B. 点击型任务（签到/打卡/领取/领券）
+   - 进入：同上跳转到 h5/Kuikly 页
+   - 触发：autoTapAllWebViews() 注入 JS 遍历 button/a/div/span，匹配关键词后 .click()
+     关键词：签到/立即签到/一键签到/打卡/立即打卡/领取/立即领取/去完成/发布/发表/确定/同意/完成/去打卡/已打卡/领福利
+   - 判断完成：❌ 只看 JS .click() 返回文案，不校验点击后结果
+
+C. 输入型任务（元宝提问/发说说）
+   - 进入：跳转对应页
+   - 触发：❌ 无自动输入能力，JS 只会点按钮不会填内容
+   - 判断完成：❌ 基本失败
+
+D. 签到型任务（日签卡）
+   - 进入：ti.qq.com/signin h5
+   - 触发：JS 点“签到/立即签到/一键签到”
+   - 判断完成：❌ 命中率不稳
+
+E. 社交型任务（加好友/删好友/点赞/发说说）
+   - 进入：mqqapi://contact/add 等深链 或 HTTP 直连
+   - 触发：HTTP 直连函数已写（runAddFriendTask 等），依赖 p_skey/bkn，测试号是占位符
+   - 判断完成：❌ 未实测跑通
+
+========================================================================
+三、页面和数据分析（不隐藏任何已发现信息）
+========================================================================
+
+1. QQ 任务页面结构
+- 等级页 = Kuikly 远程 JS 渲染（不是标准 H5，DOM 不可靠）
+  入口：mqqapi://forward/url?url_prefix=base64(https://ti.qq.com/qqlevel/index?version=1&tab=6&source=15)
+- 网页版 task-center 会自跳 Kuikly，页面内 JS 跳转不可拦截 → WebView 拦截路线已证伪弃用
+
+2. 可读取的控件信息
+- 递归遍历 UIWindow.subviews 能定位到 WKWebView（类名 NTWKWebView，QQ 魔改版）
+- 能拿到 WebView 的 URL 属性
+- 能对标准 DOM 页执行 evaluateJavaScript；但 Kuikly 页无标准 DOM，JS 遍历基本抓不到有效按钮
+
+3. 可获取的文字/按钮/状态
+- h5 型页面：能读 innerText/textContent/value，能点关键词按钮
+- Kuikly 型页面：❌ 几乎读不到
+- 任务完成状态：❌ 页面层拿不到
+
+4. 抓包发现的接口 / 数据格式（最有价值的发现）
+
+★ 核心实锤（v1.2.24，2026-08-26）：
+  等级页全量任务数据不是 HTTP 接口，而是 protobuf over SSO！
+
+  命令（走 OidbSvcTrpcTcp）：
+  - 0x9172_0 ★ 全量加速任务（26+ 条），f4.f2 内嵌任务数组，
+            每条含 title / desc / iconURL / jumpURL / is_ios_review_hide
+  - 0x95a8   用户信息
+  - 0x916e   装扮资源
+  - 0x95a9   特权页 URL
+  - 0x98f1   模块配置（JSON 明文）
+  - 0x9743   等级图标
+  - 0x966f   好友列表
+
+  捕获路径：QQKuiklyPlatformApi -sendPbRequest: 的 callback block
+  callback 签名实锤：v16@?0@8 = void(^)(id)（单参数；曾猜多参数导致闪退，_Block_signature 探测后实锤）
+  响应结构：result = (code, errMsg, NSData pbBody, 0, 0)，取 index 2 才是 protobuf body
+  is_ios_review_hide=true 的任务在 iOS 被审核隐藏；“看10秒漫剧”“去元宝提问”= false 可见
+
+  安卓专属接口：ti.qq.com/qqlevel/trpc/levelTask/Get POST {mode:all}
+    → iOS 上 getInitialTaskMaterial 返回空 readyTasks；levelTask/Get 只返 10 个是安卓专属
+
+  抓包数据文件：D:/Temp/qqflog_1224.txt + D:/Temp/qqlevel_tasks_9172.json
+
+  已 hook 的全部网络入口：
+    NSURLSession（4 变体）、KRHttpRequestTool、QQCRHttpRequest、
+    OCIQQNTWrapperSession/Engine（onSendSSOReply/onSendOidbReply）、
+    RohanaSwiftHook、AIRequestModule、QQKuiklyPlatformApi
+
+========================================================================
+四、当前代码结构
+========================================================================
+
+D:/QQFloatBall-ci/
+├── Tweak.xm              ← 全部逻辑（2752 行，单文件）
+├── QQFloatBall.plist     ← 注入 Filter（Bundles: com.tencent.mqq / com.tencent.mobileqq）
+├── control               ← deb 元信息（v1.2.25, Maintainer: 傘, arm64e）
+├── Makefile              ← Theos 构建配置（Apple ld64 默认）
+├── layout/DEBIAN/        ← postinst / postrm 安装脚本
+├── .github/workflows/build.yml  ← GitHub Actions macOS CI
+├── SPEC-TRPC.md          ← TRPC 直调方案规格（WebView 已证伪的记录）
+├── BUG-DEADLOCK.md       ← 历史注入链死锁分析（已弃用 WebView 路线）
+├── sdk/iPhoneOS16.5.sdk  ← 构建用 SDK
+└── artifact/ v1.0.0~1.2.17 ← 历史版本产物归档
+
+Tweak.xm 内部分区（按行号）：
+  行 32–67    全局状态：悬浮球/面板/日志的静态引用 + 开关标志
+  行 70–153   日志系统：qqlog/qqlogAsync 双写文件+面板，抓包 8 秒自动停
+  行 185–217  QQFloatBallWindow：透明置顶窗口 + 精确 hitTest 穿透
+  行 223–450  网络抓包：NSURLSession/KRHttp/QQCR 三栈 hook
+  行 475–771  SSO/PB 抓取：NT wrapper + Rohana + sendPbRequest 捕获 0x9172
+  行 806–1036 凭证/HTTP 工具：zzcSign/getPskey/getSkey/httpPostJSON
+  行 1049–1193 HTTP 任务执行器：fetchTaskList/execActClaim/福利链（已禁用）
+  行 1195–1230 跳转：openJumpSchema/openLevelPage
+  行 1247–1430 内置任务清单：builtInTasks/levelTaskDefs 硬编码 jumpURL
+  行 1448–1626 一键执行主流程：runLevelTasksAuto（当前核心）
+  行 1628–1960 任务面板 UI：列表渲染/勾选/按钮
+  行 1965–2060 AI 分析：deepseek 对话
+  行 2346–2517 WKWebView JS 自动点击：autoTapAllWebViews
+  行 2519–2735 悬浮球生命周期：_setupFloatBall + Kuikly hook
+
+========================================================================
+五、目前最大问题：为什么只能盲点，不能智能判断？（≥5 个根因）
+========================================================================
+
+1. 任务真实数据（0x9172）抓到了，但没接入执行流程。
+   一键任务用的是硬编码 8 条 levelTaskDefs，不是实时读 0x9172 返回的任务列表。
+   抓包和执行是两套割裂的代码，插件“知道”有哪些任务，但执行时不看。
+
+2. 没有任何完成状态读取。
+   执行完一个任务后，不回查 0x9172 里该任务的 status 字段，只是 sleep 15 秒就宣布“已停留完成”
+   ——这是时间盲赌，不是判断。
+
+3. Kuikly 页面无标准 DOM，JS 注入基本失效。
+   autoTapAllWebViews 靠 querySelectorAll + 关键词匹配，只对老式 h5 有效。
+   QQ 现在核心页全是 Kuikly（native 渲染），JS 遍历抓不到按钮，.click() 命中率极低。
+
+4. 没有任务类型分类逻辑。
+   所有任务走同一条流水线（打开→停留→点 JS），不区分“停留型/点击型/输入型”。
+   输入型（元宝提问）需要填内容，当前流水线完全做不到。
+
+5. 没有失败重试和状态机。
+   runLevelTasksAuto 是一个 for 循环顺序跑，无重试、无回退、无幂等校验。
+   某个任务跳转失败也照样往下走，且无法感知失败。
+
+6.（附加）HTTP 直连执行器（ExecAct）本可精确领奖判断，但因 iOS 参数差异返回 -5001 被禁用，
+   导致唯一能拿“服务端返回码”的路径被切断。
+
+本质：插件停在“开环控制”——只发指令不看反馈。
+要智能判断，必须闭环：读 0x9172 真实状态 → 对比执行前后 → 判定成功/失败。
+
+========================================================================
+六、下一阶段设想：QQ 自动任务 Agent v2.0 架构（当前我方初步方案，供 ChatGPT 评审）
+========================================================================
+
+核心思想：把 0x9172 抓包能力从“日志”升级为“任务数据源与验收依据”，实现开环 → 闭环。
+
+总体架构（6 大模块）
+  调度中枢（状态机 + 任务队列 + 事件循环）
+    ├─ ① 任务发现引擎  TaskDiscovery
+    ├─ ② 任务类型识别  TaskClassifier
+    ├─ ③ 执行策略路由  StrategyRouter
+    ├─ ④ 完成判定/验收  Verifier
+    ├─ ⑤ 重试+状态记录  RetryManager + StateStore
+    └─ ⑥ 面板/停止按钮
+
+① 任务发现引擎（TaskDiscovery）
+   - 数据源：复用现有 sendPbRequest 的 0x9172 捕获能力，但要真正解析 protobuf f4.f2 得到结构化任务数组
+     （现在只 hex dump，v2.0 要真解析）
+   - 输出：[{task_id, title, desc, jumpURL, status, accelerate_days, is_ios_review_hide}]
+   - 触发：打开等级页时自动拉取；执行前主动刷新一次拿最新 status
+   - 过滤：剔除 is_ios_review_hide=true、已完成（status≥1）、付费类（充值/开通）
+
+② 任务类型识别（TaskClassifier）
+   - 按 title/jumpURL 特征归类到 5 种策略类型：
+     STAY（停留：漫剧/视频/浏览/小游戏）
+     TAP（点击：签到/打卡/领取）
+     INPUT（输入：元宝提问/发说说）
+     SOCIAL（社交：加好友/点赞）
+     HTTP（可直连领奖：福利券）
+   - 维护 jumpURL 关键词 → 类型 映射表
+
+③ 执行策略路由（StrategyRouter）
+   - STAY  ：打开页 → 停留（时长按任务定制，非固定 15s）→ 返回
+   - TAP   ：打开页 → 多轮 JS 点击 + Kuikly native 层坐标点击兜底
+   - INPUT ：打开页 → JS 填充预设内容 → 提交
+   - SOCIAL：优先 HTTP 直连（复用 runAddFriendTask），失败回退深链
+   - HTTP  ：直调 ExecAct（需先修复 iOS 参数），读返回码
+
+④ 完成判定/验收（Verifier）— v2.0 灵魂模块
+   - 执行前记录该 task 的 status（快照）
+   - 执行后重新拉取 0x9172，对比同 task_id 的 status 是否从 0→1
+   - status 变化 = 真成功；未变 = 失败进重试队列
+   - 关键：用服务端真实状态做验收，不靠 sleep
+
+⑤ 重试 + 状态记录（RetryManager + StateStore）
+   - 单任务失败重试 N 次（默认 2），仍失败标记 SKIP 继续
+   - 任务间隔可配（防风控，建议 3–8 秒随机）
+   - 状态持久化到 Documents/task_state.json：{task_id:{attempts,last_result,last_ts}}
+   - 幂等：已 status≥1 的任务本轮直接跳过
+
+⑥ 调度中枢（Scheduler）+ 面板
+   - 状态机：IDLE → DISCOVERING → CLASSIFYING → EXECUTING(task_i) → VERIFYING → (RETRY|NEXT) → DONE
+   - 停止按钮（用户明确要求：一键任务跑起来要能中断）——加可中断标志，每步检查
+   - 面板实时显示：[3/8] 看10秒漫剧 → 执行中 → 验收: status 0→1 ✓
+   - 全程后台，不打扰用户
+
+v2.0 相对 v1.2.25 的本质升级
+   任务来源：硬编码 8 条        → 实时解析 0x9172 全量
+   完成判断：sleep 盲赌         → 服务端 status 对比
+   类型处理：一刀切            → 5 类分策略
+   失败处理：无                → 重试+跳过+记录
+   中断    ：不能停            → 可停止
+   控制模型：开环              → 闭环
+
+========================================================================
+七、希望 ChatGPT 重点给建议的问题
+========================================================================
+
+1. v2.0 的模块优先级是否合理？我方判断应先攻“④完成判定（读服务端真实 status）”，
+   因为不解决它，其他模块都在盲赌上叠加。是否认同？
+
+2. protobuf 0x9172 的 f4.f2 该如何稳健解析？
+   - 现在只有 hex dump（D:/Temp/qqlevel_tasks_9172.json 有原始数据）
+   - 无 .proto 定义，是否建议用未知字段的通用 protobuf 解码（按 wire type 逐字段扫）？
+   - 在 iOS 插件进程内解 protobuf，用什么方案最稳（手写 varint 解析 vs 引入轻量 pb 库）？
+
+3. Kuikly 页面（native 渲染，无标准 DOM）如何可靠触发点击？
+   - JS 注入对 Kuikly 基本失效
+   - 是否该走 UIView 层级遍历 + 坐标点击？还是有更稳的 native hook 思路？
+
+4. 防风控建议：全自动遍历任务是否有封号风险？间隔/随机化/频率该如何设计？
+
+5. 是否有比“开环跳转 + 停留”更优的整体思路？
+   （比如：能否完全走 protobuf 直连模拟客户端上报，绕开页面跳转？0x9172 是否可反向构造上报请求？）
+
+========================================================================
+（全文完 · 供 ChatGPT 评审）
+========================================================================

@@ -1378,8 +1378,10 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 
 // ── 提前声明：runAutoTasks 里调用（定义在其后）──
 static void autoTapAllWebViews(void);
+static void autoTapWebView(id webView);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
+static void runClosedLoopTasks(void);
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 
 // ══════════════════════════════════════════
@@ -2870,7 +2872,7 @@ static int qqfbDefaultStayTime(QQFBTaskCategory cat, NSString *jump) {
 }
 
 // ── topMostViewController 快照：(class名称, WKWebView数量, 各WKWebView URL) ──
-static void qqfbSnapshotTopVC(NSString *tag, NSString *jump) {
+static void qqfbSnapshotTopVC(NSString *tag) {
     @try {
         Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
         id topVC = utilCls ? ((id (*)(id, SEL))objc_msgSend)(utilCls, NSSelectorFromString(@"topMostViewController")) : nil;
@@ -2987,7 +2989,6 @@ static int qqfbFindTaskStatusByTitleIn(NSArray *tasks, NSString *taskId, NSStrin
 // ── 执行单个任务(v1.4.1 新执行器)：分类 → 页面加载确认 → 执行 → 日志。
 //    out 里回填：statusBefore / statusAfter / reason / costMs
 static int qqfbExecOneTask(NSDictionary *task,
-                            NSString *beforeJson,
                             double *costMs) {
     NSString *title = task[@"title"] ?: @"?";
     NSString *tid = task[@"taskId"] ?: @"";
@@ -3015,7 +3016,7 @@ static int qqfbExecOneTask(NSDictionary *task,
     // 执行前记录页面快照
     double tStart = CFAbsoluteTimeGetCurrent();
     qqlog(@"[v141][前] ─ 执行前页面快照，准备打开 %@", title);
-    qqfbSnapshotTopVC(@"前", jump);
+    qqfbSnapshotTopVC(@"前");
     int loadCost = 0;
     int execMs = 0;
 
@@ -3195,7 +3196,7 @@ static void runClosedLoopTasks(void) {
                                     [NSString stringWithFormat:@"%@(id=%@) 执行前 status=%d，已跳过", title, tid, before]);
 
                 double costMs = 0;
-                int res = qqfbExecOneTask(task, nil, &costMs);
+                int res = qqfbExecOneTask(task, &costMs);
                 switch (res) {
                     case 0: okN++; break;
                     case 2: doneN++; break;

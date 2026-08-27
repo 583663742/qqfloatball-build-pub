@@ -54,6 +54,8 @@ static BOOL _captureOnlyTasks = NO;
 // ── v1.2.9: 点击「额外活跃」后 5 秒内无条件记录所有请求 URL+body（锁定33任务真实接口）──
 // v1.2.11: 打开等级页后立即开启 8 秒 DUMP（等级页一打开就拉取全量任务，不需点额外活跃）
 static BOOL _dumpAllRequests = NO;
+// v1.4: 闭环执行进行中（暂停抓包自动停止，保证执行后重抓 0x9172 不被 8 秒定时器打断）
+static BOOL _closedLoopRunning = NO;
 
 // ── v1.2.11: AI 对话分析（参考微信插件 wxresearch 对话模式）──
 static NSMutableArray *_aiHistory = nil;   // AI 对话历史（system + user + assistant）
@@ -129,6 +131,8 @@ static BOOL isLevelKeyURL(NSString *url) {
 // ── v1.2.22: 抓包自动停止 —— 抓到关键响应后 8 秒无新数据自动停（不再固定 30 秒）──
 static BOOL _autoStopScheduled = NO;
 static void qqfbScheduleAutoStop(void) {
+    // v1.4: 闭环执行期间禁止自动停（否则 8 秒无新响应会关抓包，导致执行后重抓 0x9172 失败）
+    if (_closedLoopRunning) return;
     // 每次关键响应到达时重置 8 秒窗口；窗口内无新响应则自动停
     static dispatch_source_t timer = NULL;
     dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0);
@@ -1768,9 +1772,203 @@ static void runLevelTasksAuto(void) {
 }
 
 // ══════════════════════════════════════════
-//  任务列表面板 UI（v1.1.0 新 UI，替代系统弹窗）
-//  勾选任务 → 执行勾选；测试模式 → 加好友→删好友
+//  v1.4 闭环执行引擎（状态闭环：执行前抓 0x9172 → 过滤 → 执行 → 重抓对比）
+//  复用现有 openJumpSchema / autoTapAllWebViews / 停留逻辑，不新增复杂操作
 // ══════════════════════════════════════════
+
+// ── 读取 qqtask_status.json 的任务列表（nil=无数据）──
+static NSArray *qqfbReadTaskStatusList(void) {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqtask_status.json"];
+    NSData *jd = [NSData dataWithContentsOfFile:path];
+    if (!jd || jd.length == 0) return nil;
+    @try {
+        NSDictionary *root = [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil];
+        if ([root isKindOfClass:[NSDictionary class]]) {
+            return root[@"tasks"];
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+// ── 当前 qqtask_status.json 的 capturedAt（Unix 时间戳，无文件=0）──
+static double qqfbStatusCapturedAt(void) {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqtask_status.json"];
+    NSData *jd = [NSData dataWithContentsOfFile:path];
+    if (!jd || jd.length == 0) return 0;
+    @try {
+        NSDictionary *root = [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil];
+        NSNumber *ts = root[@"capturedAt"];
+        if ([ts isKindOfClass:[NSNumber class]]) return [ts doubleValue];
+    } @catch (NSException *e) {}
+    return 0;
+}
+
+// ── 等待 capturedAt 更新（打开等级页触发 0x9172 后轮询，最多 timeoutSec 秒）──
+static BOOL qqfbWaitStatusRefresh(double oldTs, int timeoutSec) {
+    for (int i = 0; i < timeoutSec * 2; i++) {
+        [NSThread sleepForTimeInterval:0.5];
+        if (qqfbStatusCapturedAt() > oldTs + 0.001) return YES;
+    }
+    return NO;
+}
+
+// ── 按 taskId 或 title 在任务列表找 status（-1=找不到）──
+static int qqfbFindTaskStatusIn(NSArray *tasks, NSString *taskId, NSString *title) {
+    for (NSDictionary *t in tasks) {
+        if (![t isKindOfClass:[NSDictionary class]]) continue;
+        NSString *tid = t[@"taskId"] ?: @"";
+        if (taskId.length && [tid isEqualToString:taskId]) {
+            NSNumber *s = t[@"status"];
+            return s ? [s intValue] : -1;
+        }
+    }
+    if (title.length) {
+        int st = findTaskStatusByTitle(tasks, title);
+        if (st >= 0) return st;
+    }
+    return -1;
+}
+
+// ── 付费任务标题判定（真机 0x9172 数据实锤：付费任务带 taskId 但标题含这些词）──
+static BOOL qqfbIsPaidTaskTitle(NSString *title) {
+    if (!title) return NO;
+    static NSArray *kws = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        kws = @[@"开通", @"购买", @"买断", @"包月", @"年费", @"专享", @"靓号", @"黑金", @"炫彩",
+                @"大会员", @"SVIP", @"黄钻", @"至尊"];
+    });
+    for (NSString *kw in kws) {
+        if ([title containsString:kw]) return YES;
+    }
+    return NO;
+}
+
+// ── 过滤可执行任务：status=0 + 有taskId + 有jumpURL + 非付费 ──
+static NSMutableArray *qqfbFilterExecutableTasks(NSArray *tasks) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *t in tasks) {
+        if (![t isKindOfClass:[NSDictionary class]]) continue;
+        int st = [t[@"status"] intValue];
+        if (st != 0) continue;                    // 已完成/已结束跳过
+        NSString *tid = t[@"taskId"] ?: @"";
+        if (tid.length == 0) continue;            // 无taskId（付费/无法判断）跳过
+        NSString *jump = t[@"jumpURL"] ?: @"";
+        if (jump.length == 0) continue;           // 无跳转入口跳过
+        NSString *title = t[@"title"] ?: @"";
+        if (qqfbIsPaidTaskTitle(title)) continue; // 付费任务跳过
+        [out addObject:t];
+    }
+    return out;
+}
+
+// ── 随机抽 maxCount 个（可执行任务超过上限时用；≤上限全用）──
+static NSArray *qqfbPickRandomTasks(NSArray *tasks, int maxCount) {
+    NSMutableArray *pool = [tasks mutableCopy];
+    NSMutableArray *picked = [NSMutableArray array];
+    while (pool.count > 0 && picked.count < maxCount) {
+        NSUInteger idx = arc4random_uniform((uint32_t)pool.count);
+        [picked addObject:pool[idx]];
+        [pool removeObjectAtIndex:idx];
+    }
+    return picked;
+}
+
+// ── 闭环执行主流程 ──
+static void runClosedLoopTasks(void) {
+    if (_levelTasksRunning) {
+        appendLogView(@"⚠️ 任务已在执行中，请勿重复点击");
+        return;
+    }
+    _levelTasksRunning = YES;
+    _closedLoopRunning = YES;   // 暂停抓包自动停止
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            qqlog(@"[闭环] ── 闭环执行开始（执行前抓取 0x9172 任务列表）──");
+
+            // ── 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等待新数据 ──
+            double oldTs = qqfbStatusCapturedAt();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                _dumpAllRequests = YES;
+                qqlog(@"[闭环] 抓包已开启，打开等级页刷新任务列表…");
+                openLevelPage();
+            });
+            if (!qqfbWaitStatusRefresh(oldTs, 15)) {
+                qqlog(@"[闭环] ⚠️ 15 秒内未抓到新的 0x9172 响应（等级页可能未打开/已抓过最新数据）");
+            }
+            NSArray *taskList = qqfbReadTaskStatusList();
+            if (!taskList || taskList.count == 0) {
+                qqlog(@"[闭环] ❌ 没有任务数据，请先手动打开等级页一次");
+                return;
+            }
+            NSMutableArray *cand = qqfbFilterExecutableTasks(taskList);
+            qqlog(@"[闭环] 0x9172 共 %lu 个任务，可执行（status=0 免费有入口）%lu 个",
+                  (unsigned long)taskList.count, (unsigned long)cand.count);
+            for (NSDictionary *t in cand) {
+                qqlog(@"[闭环]   候选: id=%@ %@", t[@"taskId"] ?: @"", t[@"title"] ?: @"?");
+            }
+            if (cand.count == 0) {
+                qqlog(@"[闭环] ✅ 没有可执行任务（可能今天都做完了）");
+                return;
+            }
+
+            // ── 2. 随机抽 3 个执行（真机测试要求）──
+            NSArray *picked = qqfbPickRandomTasks(cand, 3);
+            qqlog(@"[闭环] 本次随机抽取 %lu 个任务执行", (unsigned long)picked.count);
+            int okN = 0, failN = 0;
+            int idx = 0;
+            for (NSDictionary *task in picked) {
+                idx++;
+                NSString *title = task[@"title"] ?: @"?";
+                NSString *tid = task[@"taskId"] ?: @"";
+                NSString *jump = task[@"jumpURL"] ?: @"";
+                int before = [task[@"status"] intValue];
+                qqlog(@"[闭环] ── [%d/%lu] %@（id=%@）执行前 status=%d ──", idx, (unsigned long)picked.count, title, tid, before);
+
+                // 3. 打开任务页 + JS 自动点击（复用现有逻辑）+ 停留
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    openJumpSchema(jump);
+                });
+                for (int round = 0; round < 3; round++) {
+                    [NSThread sleepForTimeInterval:5];
+                    autoTapAllWebViews();
+                }
+
+                // 4. 执行后：回等级页触发新 0x9172 → 对比 status
+                double t0 = qqfbStatusCapturedAt();
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    openLevelPage();
+                });
+                BOOL got = qqfbWaitStatusRefresh(t0, 20);
+                int after = -1;
+                if (got) {
+                    NSArray *newList = qqfbReadTaskStatusList();
+                    after = qqfbFindTaskStatusIn(newList ?: @[], tid, title);
+                }
+                if (after == 1) {
+                    okN++;
+                    qqlog(@"[闭环] ✅ [完成] %@ %d → %d", title, before, after);
+                } else if (after == 0) {
+                    failN++;
+                    qqlog(@"[闭环] ❌ [失败] %@ %d → %d（状态未变化，可能任务完成方式不对）", title, before, after);
+                } else {
+                    failN++;
+                    qqlog(@"[闭环] ❌ [失败] %@ %d → %@（执行后未抓到新状态%@）",
+                          title, before, after == -1 ? @"?" : @(after),
+                          got ? @"" : @"，重抓超时");
+                }
+            }
+            qqlog(@"[闭环] ── 闭环执行结束：成功 %d / 失败 %d ──", okN, failN);
+        } @catch (NSException *e) {
+            qqlog(@"[闭环] 异常 %@", e);
+        }
+        _closedLoopRunning = NO;
+        _levelTasksRunning = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _dumpAllRequests = NO;
+        });
+    });
+}
 
 // ── 任务状态文案 ──
 static NSString *taskStatusText(NSDictionary *task) {
@@ -2031,7 +2229,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.3-test";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.4";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2072,10 +2270,10 @@ static void showTaskPanel(void) {
     [closeBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:closeBtn];
 
-    // v1.2.25: 一键做任务按钮（整行，遍历免费任务自动打开停留）
+    // v1.4: 闭环做任务按钮（执行前抓0x9172→过滤→随机3个→执行→重抓对比状态）
     UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     runBtn.frame = CGRectMake(6, 38, (w - 18) / 2, 30);
-    [runBtn setTitle:@"🚀 一键做任务" forState:UIControlStateNormal];
+    [runBtn setTitle:@"🔁 闭环做任务" forState:UIControlStateNormal];
     [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
     runBtn.layer.cornerRadius = 6;
@@ -2500,9 +2698,9 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskRunLevelTapped:(UIButton *)sender {
-    // v1.2.25: 一键遍历免费等级任务，逐个打开页面停留 + JS 自动点击
-    appendLogView(@"🚀 一键做任务：开始遍历免费任务…");
-    runLevelTasksAuto();
+    // v1.4: 闭环做任务（执行前抓0x9172→过滤→随机3个→执行→重抓对比状态）
+    appendLogView(@"🔁 闭环做任务：开始（抓取任务列表→过滤→随机3个→执行→对比状态）…");
+    runClosedLoopTasks();
 }
 
 %new

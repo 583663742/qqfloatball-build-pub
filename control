@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.3.0
-Description: QQ floating ball - 0x9172 task status parse (v1.3-test)
+Version: 1.4.0
+Description: QQ floating ball - closed-loop task execution (v1.4)
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

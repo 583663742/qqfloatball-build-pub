@@ -2837,24 +2837,21 @@ static QQFBTaskCategory qqfbClassifyTask(NSString *jump, NSString *title) {
 // ── 从描述/URL 里提取要求时长(秒)，无法提取返回 0 用默认值 ──
 // 支持："10s/15s/30s"、"10秒/15秒"、"分钟"、URL 内 watchTime=10 之类
 static int qqfbExtractRequiredTime(NSString *desc, NSString *jump) {
-    int v = 0;
-    for (NSString *text in @[jump ?: @"", desc ?: @""]) {
-        if (!text) continue;
-        NSString *low = text.lowercaseString;
-        NSScanner *sc = [NSScanner scannerWithString:low];
-        while ([sc scanUpToCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:nil]) {
-            NSString *num = nil;
-            if ([sc scanCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:&num] && num.length) {
-                v = [num intValue];
-                NSString *after = [low substringFromIndex:sc.scanLocation];
-                if (v > 0 && (after.length == 0 || [after hasPrefix:@"s"]) && ![after hasPrefix:@"second"]) {
-                    // 可能是 "10s" 秒，保留
-                }
-                if ([after hasPrefix:@"分"] || [after hasPrefix:@"分钟"]) v = v * 60;
-                return v;
-            }
-        }
+    // 任务描述优先：只接受带明确时间单位的数字，避免把 URL 的 version/id 参数误当秒数。
+    NSString *d = desc ?: @"";
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"([0-9]+)\\s*(秒|秒钟|s|sec|second|分钟|分)" options:NSRegularExpressionCaseInsensitive error:nil];
+    NSTextCheckingResult *m = [re firstMatchInString:d options:0 range:NSMakeRange(0, d.length)];
+    if (m) {
+        int v = [[d substringWithRange:[m rangeAtIndex:1]] intValue];
+        NSString *unit = [d substringWithRange:[m rangeAtIndex:2]];
+        if ([unit hasPrefix:@"分"]) v *= 60;
+        return v;
     }
+    // URL 只识别明确的 watchTime 参数，不扫描 version/taskId 等普通数字。
+    NSString *j = jump ?: @"";
+    NSRegularExpression *wr = [NSRegularExpression regularExpressionWithPattern:@"(?:watchTime|watch_time|duration)=([0-9]+)" options:NSRegularExpressionCaseInsensitive error:nil];
+    NSTextCheckingResult *wm = [wr firstMatchInString:j options:0 range:NSMakeRange(0, j.length)];
+    if (wm) return [[j substringWithRange:[wm rangeAtIndex:1]] intValue];
     return 0;
 }
 
@@ -2908,7 +2905,9 @@ static BOOL qqfbWaitPageLoad(NSString *jump, double waitSec) {
         NSString *host = nil;
         if ([s scanUpToString:@"/" intoString:&host]) match = host;
     }
-    if (!match && [low containsString:@"kuikly"]) match = nil; // Kuikly 原生页不靠 URL
+    if ([low containsString:@"mqqapi://kuikly"] || [low containsString:@"kuikly/open"]) {
+        match = nil; // Kuikly 原生页不依赖 WKWebView URL，必须走页面切换/结构变化确认
+    }
 
     NSString *beforeVC = nil;
     NSUInteger beforeWvCnt = 0;

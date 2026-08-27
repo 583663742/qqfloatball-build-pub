@@ -2928,7 +2928,7 @@ static BOOL qqfbWaitPageLoad(NSString *jump, double waitSec) {
             Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
             id vc = utilCls ? ((id (*)(id, SEL))objc_msgSend)(utilCls, NSSelectorFromString(@"topMostViewController")) : nil;
             NSString *cur = vc ? NSStringFromClass([vc class]) : @"nil";
-            if (!cur.isEqualToString:beforeVC) changed = YES;
+            if (![cur isEqualToString:beforeVC]) changed = YES;
         } @catch (NSException *e) {}
         // 辅助信号：WKWebView 数量增加(网页/Kuikly 加载后新 WebView 出现)→ 页面已打开
         if (!changed) {
@@ -2981,8 +2981,10 @@ static id qqfbFindTaskWebView(NSString *jump) {
     return nil;
 }
 
+// ── 在任务列表里按 taskId 或 title 找 status（前置声明）──
+static int qqfbFindTaskStatusByTitleIn(NSArray *tasks, NSString *taskId, NSString *title);
+
 // ── 执行单个任务(v1.4.1 新执行器)：分类 → 页面加载确认 → 执行 → 日志。
-//    返回 {0=成功(0→1), 1=失败(0→0/其他), 2=已结束(0→2), 3=执行前非0跳过}
 //    out 里回填：statusBefore / statusAfter / reason / costMs
 static int qqfbExecOneTask(NSDictionary *task,
                             NSString *beforeJson,

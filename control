@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.4.0
-Description: QQ floating ball - closed-loop task execution (v1.4)
+Version: 1.4.1
+Description: QQ floating ball - closed-loop task execution (v1.4.1 task-execution layer)
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

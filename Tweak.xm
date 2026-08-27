@@ -3,6 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1774,7 +1775,9 @@ static void runLevelTasksAuto(void) {
 
 // ══════════════════════════════════════════
 //  v1.4 闭环执行引擎（状态闭环：执行前抓 0x9172 → 过滤 → 执行 → 重抓对比）
-//  复用现有 openJumpSchema / autoTapAllWebViews / 停留逻辑，不新增复杂操作
+//  v1.4.1：任务分类执行层（STAY/TAP/INPUT/SKIP）
+//  不复用"扫描所有 WKWebView + 关键词盲点"（v1.4 失败根因：Kuikly 原生页无 WKWebView 导致盲点空转）
+//  最小改动：不重构，仅在 runClosedLoopTasks 基础上新增分类 + 页面加载确认 + 定向执行
 // ══════════════════════════════════════════
 
 // ── 读取 qqtask_status.json 的任务列表（nil=无数据）──
@@ -1873,102 +1876,6 @@ static NSArray *qqfbPickRandomTasks(NSArray *tasks, int maxCount) {
         [pool removeObjectAtIndex:idx];
     }
     return picked;
-}
-
-// ── 闭环执行主流程 ──
-static void runClosedLoopTasks(void) {
-    if (_levelTasksRunning) {
-        appendLogView(@"⚠️ 任务已在执行中，请勿重复点击");
-        return;
-    }
-    _levelTasksRunning = YES;
-    _closedLoopRunning = YES;   // 暂停抓包自动停止
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        @try {
-            qqlog(@"[闭环] ── 闭环执行开始（执行前抓取 0x9172 任务列表）──");
-
-            // ── 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等待新数据 ──
-            double oldTs = qqfbStatusCapturedAt();
-            dispatch_async(dispatch_get_main_queue(), ^{
-                _dumpAllRequests = YES;
-                qqlog(@"[闭环] 抓包已开启，打开等级页刷新任务列表…");
-                openLevelPage();
-            });
-            if (!qqfbWaitStatusRefresh(oldTs, 15)) {
-                qqlog(@"[闭环] ⚠️ 15 秒内未抓到新的 0x9172 响应（等级页可能未打开/已抓过最新数据）");
-            }
-            NSArray *taskList = qqfbReadTaskStatusList();
-            if (!taskList || taskList.count == 0) {
-                qqlog(@"[闭环] ❌ 没有任务数据，请先手动打开等级页一次");
-                return;
-            }
-            NSMutableArray *cand = qqfbFilterExecutableTasks(taskList);
-            qqlog(@"[闭环] 0x9172 共 %lu 个任务，可执行（status=0 免费有入口）%lu 个",
-                  (unsigned long)taskList.count, (unsigned long)cand.count);
-            for (NSDictionary *t in cand) {
-                qqlog(@"[闭环]   候选: id=%@ %@", t[@"taskId"] ?: @"", t[@"title"] ?: @"?");
-            }
-            if (cand.count == 0) {
-                qqlog(@"[闭环] ✅ 没有可执行任务（可能今天都做完了）");
-                return;
-            }
-
-            // ── 2. 随机抽 3 个执行（真机测试要求）──
-            NSArray *picked = qqfbPickRandomTasks(cand, 3);
-            qqlog(@"[闭环] 本次随机抽取 %lu 个任务执行", (unsigned long)picked.count);
-            int okN = 0, failN = 0;
-            int idx = 0;
-            for (NSDictionary *task in picked) {
-                idx++;
-                NSString *title = task[@"title"] ?: @"?";
-                NSString *tid = task[@"taskId"] ?: @"";
-                NSString *jump = task[@"jumpURL"] ?: @"";
-                int before = [task[@"status"] intValue];
-                qqlog(@"[闭环] ── [%d/%lu] %@（id=%@）执行前 status=%d ──", idx, (unsigned long)picked.count, title, tid, before);
-
-                // 3. 打开任务页 + JS 自动点击（复用现有逻辑）+ 停留
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    openJumpSchema(jump);
-                });
-                for (int round = 0; round < 3; round++) {
-                    [NSThread sleepForTimeInterval:5];
-                    autoTapAllWebViews();
-                }
-
-                // 4. 执行后：回等级页触发新 0x9172 → 对比 status
-                double t0 = qqfbStatusCapturedAt();
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    openLevelPage();
-                });
-                BOOL got = qqfbWaitStatusRefresh(t0, 20);
-                int after = -1;
-                if (got) {
-                    NSArray *newList = qqfbReadTaskStatusList();
-                    after = qqfbFindTaskStatusIn(newList ?: @[], tid, title);
-                }
-                if (after == 1) {
-                    okN++;
-                    qqlog(@"[闭环] ✅ [完成] %@ %d → %d", title, before, after);
-                } else if (after == 0) {
-                    failN++;
-                    qqlog(@"[闭环] ❌ [失败] %@ %d → %d（状态未变化，可能任务完成方式不对）", title, before, after);
-                } else {
-                    failN++;
-                    qqlog(@"[闭环] ❌ [失败] %@ %d → %@（执行后未抓到新状态%@）",
-                          title, before, after == -1 ? @"?" : @(after),
-                          got ? @"" : @"，重抓超时");
-                }
-            }
-            qqlog(@"[闭环] ── 闭环执行结束：成功 %d / 失败 %d ──", okN, failN);
-        } @catch (NSException *e) {
-            qqlog(@"[闭环] 异常 %@", e);
-        }
-        _closedLoopRunning = NO;
-        _levelTasksRunning = NO;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _dumpAllRequests = NO;
-        });
-    });
 }
 
 // ── 任务状态文案 ──
@@ -2230,7 +2137,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.4";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.4.1";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2699,8 +2606,8 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskRunLevelTapped:(UIButton *)sender {
-    // v1.4: 闭环做任务（执行前抓0x9172→过滤→随机3个→执行→重抓对比状态）
-    appendLogView(@"🔁 闭环做任务：开始（抓取任务列表→过滤→随机3个→执行→对比状态）…");
+    // v1.4.1: 闭环做任务（分类执行 STAY/TAP/INPUT/SKIP，STAY 先确认页面加载再计时，TAP 定向点击，重抓对比状态）
+    appendLogView(@"🔁 闭环做任务 v1.4.1：开始（任务分类→页面加载确认→定向执行→重抓对比）…");
     runClosedLoopTasks();
 }
 
@@ -2863,54 +2770,451 @@ __attribute__((unused)) static void dumpObjCClasses(void) {
     }
 }
 
-// ── 直接调用 QQLoginPSKeyManager 拿 p_skey（免登录核心）──
-__attribute__((unused)) static void dumpPSKeys(void) {
-    Class mgrCls = NSClassFromString(@"QQLoginPSKeyManager");
-    if (!mgrCls) { qqlog(@"[pskey] QQLoginPSKeyManager 不存在"); return; }
-    id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, NSSelectorFromString(@"sharedInstance"));
-    if (!mgr) { qqlog(@"[pskey] sharedInstance 为空"); return; }
+// ══════════════════════════════════════════
+//  v1.4.1 任务执行层（任务分类 + 页面加载确认 + 定向执行 + 状态对比）
+//  分类：STAY(停留型：小说/视频/漫剧/浏览/小游戏) / TAP(点击型：签到/打卡/领券/领取)
+//        INPUT(输入型：提问/发说说 → v1.4.1 暂不处理，记 SKIP) / SKIP(其余)
+//  执行规则：
+//    STAY：先确认页面加载完成(topMostViewController 切换 或 目标 WKWebView 出现)再计时；
+//           计时从页面确认加载成功开始，不停留期不 autotap；时长优先取描述要求值，无则保守默认。
+//    TAP：等待目标 URL 出现，仅对当前任务的 WKWebView 注入点击(不扫描所有 WebView)，停留 ~10s。
+//    INPUT/SKIP：记录原因，跳过。
+//  结束后：回等级页重抓 0x9172 对比 —— 0→1 成功 / 0→0 失败 / 0→2 已结束。
+//  测试版：仅测 2 个 —— 1 STAY(视频1021) + 1 TAP(日签卡1010)。
+// ══════════════════════════════════════════
 
-    NSArray *domains = @[@"ti.qq.com", @"qun.qq.com", @"vip.qq.com", @"qzone.qq.com"];
-    NSArray *uins = @[@"583663742", @"820284286", @"1172628163"];
+// ── 任务分类结果（按 title+jumpURL 判定）──
+typedef NS_ENUM(NSInteger, QQFBTaskCategory) {
+    QQFBTaskCategory_STAY = 1,   // 停留型
+    QQFBTaskCategory_TAP = 2,    // 点击型
+    QQFBTaskCategory_INPUT = 3,  // 输入型（暂不支持）
+    QQFBTaskCategory_SKIP = 4    // 跳过
+};
 
-    SEL sel = NSSelectorFromString(@"getLocalKeyOfDomain:uin:keyType:");
-    NSMethodSignature *sig = [mgr methodSignatureForSelector:sel];
-    if (!sig) { qqlog(@"[pskey] 无 getLocalKeyOfDomain:uin:keyType: 签名"); return; }
+// ── 按 jumpURL+title 判定分类（小说/视频/漫剧 Kuikly 原生页 → STAY；签到/打卡/领券 H5 → TAP；提问/说说 → INPUT）──
+static QQFBTaskCategory qqfbClassifyTask(NSString *jump, NSString *title) {
+    NSString *j = jump ?: @"";
+    NSString *t = title ?: @"";
+    NSString *jt = [NSString stringWithFormat:@"%@|%@", j, t];
+    NSString *low = jt.lowercaseString;
 
-    for (NSString *d in domains) {
-        for (NSString *u in uins) {
-            for (int kt = 0; kt <= 2; kt++) {
-                @try {
-                    __unsafe_unretained NSString *dArg = d;
-                    __unsafe_unretained NSString *uArg = u;
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setTarget:mgr];
-                    [inv setSelector:sel];
-                    [inv setArgument:&dArg atIndex:2];
-                    [inv setArgument:&uArg atIndex:3];
-                    NSInteger ktV = kt;
-                    [inv setArgument:&ktV atIndex:4];
-                    [inv invoke];
-                    __unsafe_unretained id ret = nil;
-                    [inv getReturnValue:&ret];
-                    if (ret) {
-                        qqlog(@"[pskey] domain=%@ uin=%@ keyType=%d -> %@", d, u, kt, ret);
-                    }
-                } @catch (NSException *e) {
-                    qqlog(@"[pskey] %@ uin%@ kt%d 异常 %@", d, u, kt, e);
+    // INPUT：提问/发说说（v1.4.1 暂不处理）
+    if ([low containsString:@"元宝"] || [low containsString:@"提问"] || [low containsString:@"说说"] || [low containsString:@"写动态"]) {
+        return QQFBTaskCategory_INPUT;
+    }
+
+    // STAY：Kuikly 原生页（小说/视频/漫剧/小游戏/浏览）—— 这些是 mqqapi://kuikly，无 WKWebView
+    if ([low containsString:@"kuikly"]) {
+        return QQFBTaskCategory_STAY;
+    }
+    // STAY：club.vip.qq.com 内的漫画/浏览/福利社停留页
+    if ([low containsString:@"comic"] || [low containsString:@"mono/comic"]) {
+        return QQFBTaskCategory_STAY;
+    }
+    // STAY：空间动态浏览、阅读类（qzoneschema、read、浏览、看、阅读）
+    if ([low containsString:@"browse"] || [low containsString:@"浏览"] ||
+        [low containsString:@"看"] || [low containsString:@"阅读"]) {
+        return QQFBTaskCategory_STAY;
+    }
+
+    // TAP：H5 点击型 —— 签到/日签/打卡/领券/领取
+    if ([low containsString:@"signin"] || [low containsString:@"签到"] || [low containsString:@"打卡"] ||
+        [low containsString:@"领券"] || [low containsString:@"领取"] || [low containsString:@"福利券"]) {
+        return QQFBTaskCategory_TAP;
+    }
+    // TAP：act.qzone 活动页里的点击领取类（战令/盲盒签）→ v1.4.1 记为 TAP（尝试点击，点不到就靠停留兜底）
+    if ([low containsString:@"act.qzone"] && ([low containsString:@"战令"] || [low containsString:@"盲盒"] ||
+        [low containsString:@"sign"] || [low containsString:@"打卡"])) {
+        return QQFBTaskCategory_TAP;
+    }
+
+    return QQFBTaskCategory_SKIP;
+}
+
+// ── 从描述/URL 里提取要求时长(秒)，无法提取返回 0 用默认值 ──
+// 支持："10s/15s/30s"、"10秒/15秒"、"分钟"、URL 内 watchTime=10 之类
+static int qqfbExtractRequiredTime(NSString *desc, NSString *jump) {
+    int v = 0;
+    for (NSString *text in @[jump ?: @"", desc ?: @""]) {
+        if (!text) continue;
+        NSString *low = text.lowercaseString;
+        NSScanner *sc = [NSScanner scannerWithString:low];
+        while ([sc scanUpToCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:nil]) {
+            NSString *num = nil;
+            if ([sc scanCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:&num] && num.length) {
+                v = [num intValue];
+                NSString *after = [low substringFromIndex:sc.scanLocation];
+                if (v > 0 && (after.length == 0 || [after hasPrefix:@"s"]) && ![after hasPrefix:@"second"]) {
+                    // 可能是 "10s" 秒，保留
+                }
+                if ([after hasPrefix:@"分"] || [after hasPrefix:@"分钟"]) v = v * 60;
+                return v;
+            }
+        }
+    }
+    return 0;
+}
+
+// ── 任务分类默认停留时长(秒)：优先取描述要求值，无则用此默认(保守)──
+static int qqfbDefaultStayTime(QQFBTaskCategory cat, NSString *jump) {
+    NSString *low = (jump ?: @"").lowercaseString;
+    if (cat == QQFBTaskCategory_STAY) {
+        if ([low containsString:@"漫画"] || [low containsString:@"comic"]) return 12;   // 看10秒漫剧
+        if ([low containsString:@"novel"] || [low containsString:@"小说"] || [low containsString:@"看"]) return 20;
+        if ([low containsString:@"game"] || [low containsString:@"小游戏"]) return 18;
+        if ([low containsString:@"视频"] || [low containsString:@"video"]) return 20;
+        return 15;   // 保守默认
+    }
+    if (cat == QQFBTaskCategory_TAP) return 10;
+    return 0;
+}
+
+// ── topMostViewController 快照：(class名称, WKWebView数量, 各WKWebView URL) ──
+static void qqfbSnapshotTopVC(NSString *tag, NSString *jump) {
+    @try {
+        Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
+        id topVC = utilCls ? ((id (*)(id, SEL))objc_msgSend)(utilCls, NSSelectorFromString(@"topMostViewController")) : nil;
+        NSString *vcCls = topVC ? NSStringFromClass([topVC class]) : @"nil";
+
+        NSMutableArray *wvUrls = [NSMutableArray array];
+        NSUInteger wvCnt = 0;
+        for (UIWindow *win in [UIApplication sharedApplication].windows) {
+            NSMutableArray *found = [NSMutableArray array];
+            collectWebViewsInView(win, found);
+            wvCnt += found.count;
+            for (id wv in found) {
+                NSURL *u = [wv valueForKey:@"URL"];
+                [wvUrls addObject:(u.absoluteString ?: @"(no-url)")];
+            }
+        }
+        qqlog(@"[v141][%@] 当前页面 class=%@ WKWebView数=%lu URLs=%@",
+              tag, vcCls, (unsigned long)wvCnt, wvUrls);
+    } @catch (NSException *e) {
+        qqlog(@"[v141][%@] 快照异常: %@", tag, e);
+    }
+}
+
+// ── 等待"页面加载完成"信号(12 秒内)：Kuikly 原生页用 topMostViewController 切换，
+//    H5/act 用目标 URL 在某 WKWebView 出现。返回 YES=确认加载。jump 里找目标主机/路径做匹配。 ──
+static BOOL qqfbWaitPageLoad(NSString *jump, double waitSec) {
+    NSString *low = (jump ?: @"").lowercaseString;
+    NSString *match = nil;
+    // 从 jump 提取匹配串：优先取主机/关键路径
+    NSScanner *s = [NSScanner scannerWithString:low];
+    if ([s scanUpToString:@"//" intoString:nil] && [s scanString:@"//" intoString:nil]) {
+        NSString *host = nil;
+        if ([s scanUpToString:@"/" intoString:&host]) match = host;
+    }
+    if (!match && [low containsString:@"kuikly"]) match = nil; // Kuikly 原生页不靠 URL
+
+    NSString *beforeVC = nil;
+    NSUInteger beforeWvCnt = 0;
+    @try {
+        Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
+        id vc = utilCls ? ((id (*)(id, SEL))objc_msgSend)(utilCls, NSSelectorFromString(@"topMostViewController")) : nil;
+        beforeVC = vc ? NSStringFromClass([vc class]) : @"nil";
+        for (UIWindow *win in [UIApplication sharedApplication].windows) {
+            NSMutableArray *f = [NSMutableArray array];
+            collectWebViewsInView(win, f);
+            beforeWvCnt += f.count;
+        }
+    } @catch (NSException *e) {}
+
+    int steps = (int)(waitSec * 2);
+    for (int i = 0; i < steps; i++) {
+        [NSThread sleepForTimeInterval:0.5];
+        BOOL changed = NO;
+        @try {
+            Class utilCls = NSClassFromString(@"QQFloatingBallUtil");
+            id vc = utilCls ? ((id (*)(id, SEL))objc_msgSend)(utilCls, NSSelectorFromString(@"topMostViewController")) : nil;
+            NSString *cur = vc ? NSStringFromClass([vc class]) : @"nil";
+            if (!cur.isEqualToString:beforeVC) changed = YES;
+        } @catch (NSException *e) {}
+        // 辅助信号：WKWebView 数量增加(网页/Kuikly 加载后新 WebView 出现)→ 页面已打开
+        if (!changed) {
+            NSUInteger nowCnt = 0;
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                NSMutableArray *f = [NSMutableArray array];
+                collectWebViewsInView(win, f);
+                nowCnt += f.count;
+            }
+            if (nowCnt > beforeWvCnt) changed = YES;
+        }
+        if (match == nil && changed) return YES;
+
+        if (match) {
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                NSMutableArray *found = [NSMutableArray array];
+                collectWebViewsInView(win, found);
+                for (id wv in found) {
+                    NSURL *u = [wv valueForKey:@"URL"];
+                    NSString *url = u.absoluteString ?: @"";
+                    if ([url.lowercaseString containsString:match]) return YES;
                 }
             }
         }
     }
+    return NO;
+}
 
-    // skey
-    @try {
-        id skey = ((id (*)(id, SEL))objc_msgSend)(mgr, NSSelectorFromString(@"getRealSig_SKEYStr"));
-        if (skey) qqlog(@"[pskey] SKEY = %@", skey);
-    } @catch (NSException *e) {
-        qqlog(@"[pskey] SKEY 异常 %@", e);
+// ── 找到"当前任务的" WKWebView（URL 匹配 jump 目标），仅返回它，不扫描所有 ──
+static id qqfbFindTaskWebView(NSString *jump) {
+    NSString *low = (jump ?: @"").lowercaseString;
+    NSString *match = nil;
+    NSScanner *s = [NSScanner scannerWithString:low];
+    if ([s scanUpToString:@"//" intoString:nil] && [s scanString:@"//" intoString:nil]) {
+        NSString *host = nil;
+        if ([s scanUpToString:@"/" intoString:&host]) match = host;
+    }
+    if (!match) match = (jump ?: @"");
+    if ([match containsString:@"kuikly"]) match = nil; // 原生页无 WebView
+    if (match == nil || [match isEqualToString:@""]) return nil;
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        NSMutableArray *found = [NSMutableArray array];
+        collectWebViewsInView(win, found);
+        for (id wv in found) {
+            NSURL *u = [wv valueForKey:@"URL"];
+            NSString *url = u.absoluteString ?: @"";
+            if ([url.lowercaseString containsString:match.lowercaseString]) return wv;
+        }
+    }
+    return nil;
+}
+
+// ── 执行单个任务(v1.4.1 新执行器)：分类 → 页面加载确认 → 执行 → 日志。
+//    返回 {0=成功(0→1), 1=失败(0→0/其他), 2=已结束(0→2), 3=执行前非0跳过}
+//    out 里回填：statusBefore / statusAfter / reason / costMs
+static int qqfbExecOneTask(NSDictionary *task,
+                            NSString *beforeJson,
+                            double *costMs) {
+    NSString *title = task[@"title"] ?: @"?";
+    NSString *tid = task[@"taskId"] ?: @"";
+    NSString *jump = task[@"jumpURL"] ?: @"";
+    NSString *desc = task[@"desc"] ?: @"";
+    int before = [task[@"status"] intValue];
+    if (before != 0) return 3;
+
+    QQFBTaskCategory cat = qqfbClassifyTask(jump, title);
+    qqlog(@"[v141][分类] %@(id=%@) → %@", title, tid,
+          cat == QQFBTaskCategory_STAY ? @"STAY(停留)" :
+          cat == QQFBTaskCategory_TAP ? @"TAP(点击)" :
+          cat == QQFBTaskCategory_INPUT ? @"INPUT(输入-暂不支持)" : @"SKIP");
+    qqlog(@"[v141][jumpURL] %@", jump.length > 140 ? [jump substringToIndex:140] : jump);
+
+    if (cat == QQFBTaskCategory_INPUT) {
+        qqlog(@"[v141][跳过] INPUT 输入型任务(提问/发说说)，v1.4.1 暂不处理");
+        return 1;
+    }
+    if (cat == QQFBTaskCategory_SKIP) {
+        qqlog(@"[v141][跳过] 无法判定的分类，跳过");
+        return 1;
+    }
+
+    // 执行前记录页面快照
+    double tStart = CFAbsoluteTimeGetCurrent();
+    qqlog(@"[v141][前] ─ 执行前页面快照，准备打开 %@", title);
+    qqfbSnapshotTopVC(@"前", jump);
+    int loadCost = 0;
+    int execMs = 0;
+
+    dispatch_async(dispatch_get_main_queue(), ^{ openJumpSchema(jump); });
+
+    // 等待页面加载完成（确认信号）
+    BOOL loaded = qqfbWaitPageLoad(jump, 12);
+    double loadEnd = CFAbsoluteTimeGetCurrent();
+    loadCost = (int)((loadEnd - tStart) * 1000);
+    if (!loaded) {
+        *costMs = loadCost;
+        qqlog(@"[v141][加载失败] 12 秒内无法确认%@页面加载完成(class 未切换 / URL 未出现)，跳过不猜",
+              cat == QQFBTaskCategory_STAY ? @"STAY" : @"TAP");
+        return 1;
+    }
+    qqlog(@"[v141][加载确认] 页面已加载，耗时 %dms", loadCost);
+
+    // ── STAY：停留要求时长(优先取描述要求值)，不停留期不 autotap ──
+    if (cat == QQFBTaskCategory_STAY) {
+        int req = qqfbExtractRequiredTime(desc, jump);
+        int dur = (req > 0) ? req : qqfbDefaultStayTime(cat, jump);
+        qqlog(@"[v141][STAY] 要求时长 %ds(desc提取=%d)，开始停留", dur, req);
+        [NSThread sleepForTimeInterval:(NSTimeInterval)dur];
+        execMs = (int)((CFAbsoluteTimeGetCurrent() - loadEnd) * 1000);
+        qqlog(@"[v141][STAY] 停留结束，实际 %dms（不 autotap）", execMs);
+    }
+    // ── TAP：定向点击当前任务的 WKWebView，再停留 ──
+    else {
+        [NSThread sleepForTimeInterval:1.5];
+        @try {
+            id wv = qqfbFindTaskWebView(jump);
+            if (wv) {
+                qqlog(@"[v141][TAP] 找到当前任务 WKWebView，注入定向点击（不扫描旧页面）");
+                autoTapWebView(wv);
+            } else {
+                qqlog(@"[v141][TAP] 未找到当前任务 WKWebView(可能已跳转)，跳过点击");
+            }
+        } @catch (NSException *e) {
+            qqlog(@"[v141][TAP] 点击异常: %@", e);
+        }
+        [NSThread sleepForTimeInterval:10];
+        execMs = (int)((CFAbsoluteTimeGetCurrent() - loadEnd) * 1000);
+        qqlog(@"[v141][TAP] 执行结束，实际 %dms", execMs);
+    }
+    *costMs = (int)((CFAbsoluteTimeGetCurrent() - tStart) * 1000);
+
+    // 回等级页重抓 0x9172
+    double t0 = qqfbStatusCapturedAt();
+    dispatch_async(dispatch_get_main_queue(), ^{ openLevelPage(); });
+    BOOL got = qqfbWaitStatusRefresh(t0, 20);
+    int after = -1;
+    int finalCost = (int)*costMs;
+    if (got) {
+        NSArray *newList = qqfbReadTaskStatusList();
+        after = qqfbFindTaskStatusByTitleIn(newList ?: @[], tid, title);
+    }
+    NSString *catStr = (cat == QQFBTaskCategory_STAY) ? @"STAY" : @"TAP";
+    if (after == 1) {
+        qqlog(@"[v141][完成] ✅[完成] %@ %d→1  分类=%@ 加载%dms 执行%dms 耗时%dms",
+              title, before, catStr, loadCost, execMs, finalCost);
+        return 0;
+    } else if (after == 2) {
+        qqlog(@"[v141][已结束] %d→2  分类=%@ 加载%dms 执行%dms",
+              before, catStr, loadCost, execMs);
+        return 2;
+    } else {
+        qqlog(@"[v141][失败] ❌[失败] %@ %d→%@  分类=%@ 加载%dms 执行%dms 耗时%dms 重抓%@",
+              title, before, after == -1 ? @"?" : @(after),
+              catStr, loadCost, execMs, finalCost, got ? @"" : @"超时");
+        return 1;
     }
 }
+
+// ── v1.4.1 测试模式：仅挑 1 STAY(视频 id=1021) + 1 TAP(日签卡打卡 id=1010)；
+//    若 0x9172 里没有 1010，回退到内建清单的同名 TAP 任务(日签卡 ti.qq.com/signin) ──
+static NSArray *qqfbPickTestTasks(NSArray *cand) {
+    NSMutableArray *picked = [NSMutableArray array];
+    BOOL gotStay = NO, gotTap = NO;
+    NSDictionary *stayTask = nil, *tapTask = nil;
+    for (NSDictionary *t in cand) {
+        NSString *tid = t[@"taskId"] ?: @"";
+        QQFBTaskCategory c = qqfbClassifyTask(t[@"jumpURL"] ?: @"", t[@"title"] ?: @"");
+        if (!gotStay && c == QQFBTaskCategory_STAY &&
+            ([tid isEqualToString:@"1021"] || [t[@"title"] containsString:@"视频"])) {
+            stayTask = t; gotStay = YES;
+        }
+        if (!gotTap && c == QQFBTaskCategory_TAP &&
+            ([tid isEqualToString:@"1010"] || [t[@"title"] containsString:@"日签"] || [t[@"title"] containsString:@"打卡"])) {
+            tapTask = t; gotTap = YES;
+        }
+        if (gotStay && gotTap) break;
+    }
+    if (stayTask) [picked addObject:stayTask];
+    if (tapTask) {
+        [picked addObject:tapTask];
+    } else if (gotStay) {
+        // 内建清单兜底：日签卡打卡(ti.qq.com/signin)，用虚拟 taskId 标识
+        NSDictionary *fb = @{
+            @"title": @"去日签卡打一次卡",
+            @"taskId": @"builtin_signin",
+            @"jumpURL": @"https://ti.qq.com/signin/public/index.html?_wv=1090528161&_wwv=13",
+            @"desc": @""
+        };
+        [picked addObject:fb];
+        qqlog(@"[v141][测试] 0x9172 未找到日签卡任务，回退内建 TAP: 日签卡打卡(ti.qq.com/signin，无 taskId，状态对比按标题)");
+    }
+    return picked;
+}
+
+// ── 在任务列表里按 taskId 或 title 找 status（v1.4.1 兼容无 taskId 的内建任务）──
+static int qqfbFindTaskStatusByTitleIn(NSArray *tasks, NSString *taskId, NSString *title) {
+    for (NSDictionary *t in tasks) {
+        if (![t isKindOfClass:[NSDictionary class]]) continue;
+        NSString *tid = t[@"taskId"] ?: @"";
+        if (taskId.length && [tid isEqualToString:taskId]) {
+            NSNumber *s = t[@"status"];
+            return s ? [s intValue] : -1;
+        }
+        NSString *tt = t[@"title"] ?: @"";
+        if (title.length && [tt isEqualToString:title]) {
+            NSNumber *s = t[@"status"];
+            return s ? [s intValue] : -1;
+        }
+    }
+    return -1;
+}
+
+// ── 闭环执行主流程(v1.4.1)──
+static void runClosedLoopTasks(void) {
+    if (_levelTasksRunning) {
+        appendLogView(@"⚠️ 任务已在执行中，请勿重复点击");
+        return;
+    }
+    _levelTasksRunning = YES;
+    _closedLoopRunning = YES;   // 暂停抓包自动停止
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            qqlog(@"[闭环] ── v1.4.1 闭环执行开始（执行前抓取 0x9172 任务列表）──");
+
+            // ── 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等待新数据 ──
+            double oldTs = qqfbStatusCapturedAt();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                _dumpAllRequests = YES;
+                qqlog(@"[闭环] 抓包已开启，打开等级页刷新任务列表…");
+                openLevelPage();
+            });
+            if (!qqfbWaitStatusRefresh(oldTs, 15)) {
+                qqlog(@"[闭环] ⚠️ 15 秒内未抓到新的 0x9172 响应");
+            }
+            NSArray *taskList = qqfbReadTaskStatusList();
+            if (!taskList || taskList.count == 0) {
+                qqlog(@"[闭环] ❌ 没有任务数据，请先手动打开等级页一次");
+                return;
+            }
+            NSMutableArray *cand = qqfbFilterExecutableTasks(taskList);
+            qqlog(@"[闭环] 0x9172 共 %lu 个任务，可执行 %lu 个",
+                  (unsigned long)taskList.count, (unsigned long)cand.count);
+
+            // ── 2. v1.4.1 测试：仅挑 1 STAY + 1 TAP ──
+            NSArray *picked = qqfbPickTestTasks(cand);
+            if (picked.count == 0) {
+                qqlog(@"[闭环] ⚠️ 可执行任务中没有可测的 STAY/TAP，回退随机 2 个");
+                picked = qqfbPickRandomTasks(cand, 2);
+            }
+            qqlog(@"[闭环] 本次测试执行 %lu 个任务（STAY+TAP）", (unsigned long)picked.count);
+            int okN = 0, failN = 0, doneN = 0, skipN = 0;
+            int idx = 0;
+            for (NSDictionary *task in picked) {
+                idx++;
+                NSString *title = task[@"title"] ?: @"?";
+                NSString *tid = task[@"taskId"] ?: @"";
+                NSString *jump = task[@"jumpURL"] ?: @"";
+                NSString *desc = task[@"desc"] ?: @"";
+                int before = [task[@"status"] intValue];
+                qqlog(@"[闭环] ── [%d/%lu] %@", idx, (unsigned long)picked.count,
+                      before == 0 ? [NSString stringWithFormat:@"开始执行 %@(id=%@)，执行前 status=0", title, tid] :
+                                    [NSString stringWithFormat:@"%@(id=%@) 执行前 status=%d，已跳过", title, tid, before]);
+
+                double costMs = 0;
+                int res = qqfbExecOneTask(task, nil, &costMs);
+                switch (res) {
+                    case 0: okN++; break;
+                    case 2: doneN++; break;
+                    case 3: skipN++; break;
+                    default: failN++; break;
+                }
+                (void)desc;
+            }
+            qqlog(@"[闭环] ── v1.4.1 闭环执行结束：完成 %d / 失败 %d / 已结束 %d / 跳过 %d ──", okN, failN, doneN, skipN);
+        } @catch (NSException *e) {
+            qqlog(@"[闭环] 异常 %@", e);
+        }
+        _closedLoopRunning = NO;
+        _levelTasksRunning = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _dumpAllRequests = NO;
+        });
+    });
+}
+
+static void autoTapAllWebViews(void);
 
 %hook UIApplication
 

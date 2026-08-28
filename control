@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.4.3
-Description: QQ floating ball - task list only and per-task test (v1.4.3)
+Version: 1.4.4
+Description: QQ floating ball - task list only, per-task test, fat arm64+arm64e for TrollStore (v1.4.4)
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

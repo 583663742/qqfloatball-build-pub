@@ -50,6 +50,10 @@ jobs:
           name: qqfloatball-build
           path: |
             packages/*.deb
+            .theos/obj/debug/*.dylib
+            .theos/obj/debug/arm64/*.dylib
             .theos/obj/debug/arm64e/*.dylib
+            .theos/obj/*.dylib
+            .theos/obj/arm64/*.dylib
             .theos/obj/arm64e/*.dylib
           if-no-files-found: warn

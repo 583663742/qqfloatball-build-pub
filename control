@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.4.2
-Description: QQ floating ball - manual task list and per-task test (v1.4.2)
+Version: 1.4.3
+Description: QQ floating ball - task list only and per-task test (v1.4.3)
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

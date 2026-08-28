@@ -2030,69 +2030,7 @@ static void renderTaskRows(void) {
     CGFloat rowH = 46;
     CGFloat w = _taskScroll.bounds.size.width;
 
-    // ── 组1: 内置任务（可单独测试）──
-    NSArray *builtin = builtinTaskDefs();
-    if (builtin.count > 0) {
-        UILabel *grpLb = [[UILabel alloc] initWithFrame:CGRectMake(10, y, w - 20, 20)];
-        grpLb.text = @"⬡ 内置任务（已实锤接口，可单测）";
-        grpLb.textColor = [UIColor systemCyanColor];
-        grpLb.font = [UIFont boldSystemFontOfSize:11];
-        [_taskScroll addSubview:grpLb];
-        y += 22;
-        for (int i = 0; i < (int)builtin.count; i++) {
-            NSDictionary *def = builtin[i];
-            NSString *title = def[@"title"] ?: @"?";
-            UIView *row = [[UIView alloc] initWithFrame:CGRectMake(6, y, w - 12, rowH)];
-            row.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
-            row.layer.cornerRadius = 8;
-            row.userInteractionEnabled = YES;
-
-            // 勾选框
-            UIButton *chk = [UIButton buttonWithType:UIButtonTypeCustom];
-            chk.frame = CGRectMake(8, (rowH - 28) / 2.0, 28, 28);
-            chk.tag = i;
-            NSString *bid = [NSString stringWithFormat:@"builtin_%d", i];
-            BOOL checked = _checkedTaskIds && [_checkedTaskIds containsObject:bid];
-            [chk setTitle:checked ? @"☑" : @"☐" forState:UIControlStateNormal];
-            [chk setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-            chk.titleLabel.font = [UIFont systemFontOfSize:18];
-            [chk addTarget:[UIApplication sharedApplication] action:@selector(_builtinCheckTapped:) forControlEvents:UIControlEventTouchUpInside];
-            [row addSubview:chk];
-
-            // 标题
-            UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(42, 4, w - 12 - 42 - 100, 26)];
-            tl.text = title;
-            tl.textColor = [UIColor whiteColor];
-            tl.font = [UIFont systemFontOfSize:12];
-            tl.numberOfLines = 1;
-            tl.lineBreakMode = NSLineBreakByTruncatingTail;
-            [row addSubview:tl];
-
-            // 加速天数占位（内置任务固定 +0.5）
-            UILabel *dl = [[UILabel alloc] initWithFrame:CGRectMake(w - 12 - 8 - 74, 4, 74, 18)];
-            dl.text = @"+0.5天";
-            dl.textColor = [UIColor systemYellowColor];
-            dl.font = [UIFont systemFontOfSize:11];
-            dl.textAlignment = NSTextAlignmentRight;
-            [row addSubview:dl];
-
-            // 测试按钮（单个测试）
-            UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-            testBtn.frame = CGRectMake(w - 12 - 8 - 74, 24, 74, 18);
-            testBtn.tag = i;
-            [testBtn setTitle:@"▶ 测试" forState:UIControlStateNormal];
-            [testBtn setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
-            testBtn.titleLabel.font = [UIFont systemFontOfSize:10];
-            [testBtn addTarget:[UIApplication sharedApplication] action:@selector(_builtinTestTapped:) forControlEvents:UIControlEventTouchUpInside];
-            [row addSubview:testBtn];
-
-            [_taskScroll addSubview:row];
-            y += rowH + 4;
-        }
-        y += 6;
-    }
-
-    // ── 组2: 额外活跃任务（一键获取自等级页数据源）──
+    // ── 只显示等级页获取到的任务；内置任务已移除，避免误点无效任务 ──
     NSArray *list = _taskListCache;
     if (!list || list.count == 0) {
         UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(10, y, w - 20, 40)];
@@ -2122,19 +2060,8 @@ static void renderTaskRows(void) {
         row.layer.cornerRadius = 8;
         row.userInteractionEnabled = YES;
 
-        // 勾选框
-        UIButton *chk = [UIButton buttonWithType:UIButtonTypeCustom];
-        chk.frame = CGRectMake(8, (rowH - 28) / 2.0, 28, 28);
-        chk.tag = i;
-        BOOL checked = _checkedTaskIds && [tid length] > 0 && [_checkedTaskIds containsObject:tid];
-        [chk setTitle:checked ? @"☑" : @"☐" forState:UIControlStateNormal];
-        [chk setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        chk.titleLabel.font = [UIFont systemFontOfSize:18];
-        [chk addTarget:[UIApplication sharedApplication] action:@selector(_taskCheckTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [row addSubview:chk];
-
-        // 标题（可两行）
-        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(42, 4, w - 12 - 42 - 154, 26)];
+        // 标题（显示等级页获取到的任务）
+        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, w - 12 - 136, 20)];
         tl.text = title;
         tl.textColor = [UIColor whiteColor];
         tl.font = [UIFont systemFontOfSize:12];
@@ -2142,25 +2069,18 @@ static void renderTaskRows(void) {
         tl.lineBreakMode = NSLineBreakByTruncatingTail;
         [row addSubview:tl];
 
-        // 加速天数
-        UILabel *dl = [[UILabel alloc] initWithFrame:CGRectMake(w - 12 - 8 - 74, 4, 74, 18)];
-        dl.text = days;
+        // 任务收益
+        UILabel *dl = [[UILabel alloc] initWithFrame:CGRectMake(8, 24, w - 12 - 136, 18)];
+        dl.text = [NSString stringWithFormat:@"%@ / %@", days, status];
         dl.textColor = [UIColor systemYellowColor];
-        dl.font = [UIFont systemFontOfSize:11];
-        dl.textAlignment = NSTextAlignmentRight;
+        dl.font = [UIFont systemFontOfSize:10];
+        dl.numberOfLines = 1;
+        dl.lineBreakMode = NSLineBreakByTruncatingTail;
         [row addSubview:dl];
 
-        // 状态
-        UILabel *sl = [[UILabel alloc] initWithFrame:CGRectMake(w - 12 - 88 - 78, 24, 78, 16)];
-        sl.text = status;
-        sl.textColor = [UIColor systemGreenColor];
-        sl.font = [UIFont systemFontOfSize:10];
-        sl.textAlignment = NSTextAlignmentRight;
-        [row addSubview:sl];
-
-        // 额外任务逐项测试：只执行用户点击的这一行，不自动随机执行
+        // 单项测试按钮：只执行用户点击的这一行，不自动随机执行，不批量执行
         UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-        testBtn.frame = CGRectMake(w - 12 - 78, 24, 78, 18);
+        testBtn.frame = CGRectMake(w - 12 - 78, 8, 78, 30);
         testBtn.tag = i;
         [testBtn setTitle:@"▶ 测试" forState:UIControlStateNormal];
         [testBtn setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
@@ -2241,7 +2161,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.4.2";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.4.3";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];

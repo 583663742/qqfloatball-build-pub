@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       THEOS: ${{ github.workspace }}/theos
     steps:
@@ -36,6 +36,10 @@ jobs:
       - name: Build package
         run: |
           export THEOS_PACKAGE_SCHEME=roothide
+          # ★ roothidepatch symlink 必须打包进 data.tar（dpkg 解压即生效），
+          #   theos 不会自动生成，需在 make package 前手动放进 layout/
+          mkdir -p layout/Library/MobileSubstrate/DynamicLibraries
+          ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib layout/Library/MobileSubstrate/DynamicLibraries/QQFloatBall.dylib.roothidepatch
           make clean
           make package FINALPACKAGE=1
 

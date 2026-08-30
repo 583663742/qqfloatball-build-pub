@@ -1,8 +1,6 @@
-# QQFloatBall — QQ悬浮球（roothide）
-# ⚠️ 2026-08-28 关键修复：必须编译 fat 二进制（arm64 + arm64e）。
-#    只编译 arm64e 时，TrollStore 注入器无法处理 PAC 签名，dyld 校验失败→QQ闪退。
-#    能注入生效的插件（通用破解内购=arm64 / 王跳跳=arm64+arm64e fat）都有 arm64 切片。
-export ARCHS = arm64 arm64e
+# QQFloatBall — QQ悬浮球（roothide, Sileo/dpkg 路线）
+# 单 arch arm64e（设备上正常插件全是单 arch；fat 是 TrollStore 路线的错误结论，已废弃 2026-08-30）
+export ARCHS = arm64e
 export TARGET = iphone:clang:16.5:15.0
 export THEOS_PACKAGE_SCHEME = roothide
 

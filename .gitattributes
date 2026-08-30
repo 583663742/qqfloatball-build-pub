@@ -1,0 +1,15 @@
+# 强制关键脚本与配置保持 LF，避免 macOS CI checkout 后 CRLF 导致 bash/dpkg 报错
+layout/DEBIAN/postinst text eol=lf
+layout/DEBIAN/postrm  text eol=lf
+layout/DEBIAN/prerm   text eol=lf
+control               text eol=lf
+Makefile              text eol=lf
+QQFloatBall.plist     text eol=lf
+*.yml                 text eol=lf
+
+# 二进制产物不参与换行转换
+*.dylib binary
+*.deb   binary
+*.zip   binary
+*.xz    binary
+*.bin   binary

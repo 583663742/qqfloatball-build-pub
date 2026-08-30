@@ -1,14 +1,10 @@
-# QQFloatBall — QQ悬浮球（TrollStore 兼容布局）
-# ⚠️ 2026-08-30 关键修复：去掉 roothide scheme + roothide 链接，让产物走 @executable_path/libsubstrate.dylib。
-#    对照参考物（王跳跳_1.1.dylib / 通用破解内购和去广告.dylib）：
-#    - LOAD_DYLIB 全部走 @executable_path/libsubstrate.dylib（单一路径）
-#    - 无 roothide 依赖
-#    - TrollStore 注入器把这个路径改写到 QQ.app 容器内实际位置
-#    插件源码不使用 roothide API，去掉链接是安全的。
-#
-# ⚠️ 必须编译 fat 二进制（arm64 + arm64e）。只编译 arm64e 时 TrollStore 注入器无法处理 PAC 签名，dyld 校验失败→QQ闪退。
+# QQFloatBall — QQ悬浮球（roothide）
+# ⚠️ 2026-08-28 关键修复：必须编译 fat 二进制（arm64 + arm64e）。
+#    只编译 arm64e 时，TrollStore 注入器无法处理 PAC 签名，dyld 校验失败→QQ闪退。
+#    能注入生效的插件（通用破解内购=arm64 / 王跳跳=arm64+arm64e fat）都有 arm64 切片。
 export ARCHS = arm64 arm64e
-export TARGET = iphone:clang:latest:17.0
+export TARGET = iphone:clang:16.5:15.0
+export THEOS_PACKAGE_SCHEME = roothide
 
 INSTALL_TARGET_PROCESSES = QQ
 
@@ -18,7 +14,7 @@ TWEAK_NAME = QQFloatBall
 
 QQFloatBall_FILES = Tweak.xm
 QQFloatBall_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations -Wno-arc-retain-cycles -nostdinc++ -isystem "$(THEOS_SDK_PATH)/usr/include/c++/v1"
-QQFloatBall_LDFLAGS = -L"$(THEOS_SDK_PATH)/usr/lib" -framework CydiaSubstrate
+QQFloatBall_LDFLAGS = -L"$(THEOS_SDK_PATH)/usr/lib" -framework CydiaSubstrate -F"$(THEOS_VENDOR_LIBRARY_PATH)/iphone/roothide" -lroothide
 # ⚠️ 签名是标准流程：禁止 TARGET_CODESIGN=true（无签名→ellekit 1.2 拒载→球消失，2026-08-19 实锤）
 # ⚠️ 链接器必须真 Apple ld64（arm64-apple-darwin-ld / theos toolchain ld.exe, md5 016b3a02）：
 #    - 禁止 -fuse-ld=lld（mingw lld 不支持 darwin 目标）

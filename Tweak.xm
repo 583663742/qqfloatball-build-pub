@@ -128,9 +128,13 @@ static BOOL isLevelKeyURL(NSString *url) {
     return NO;
 }
 
-// ── v1.2.22: 抓包自动停止 —— 抓到关键响应后 8 秒无新数据自动停（不再固定 30 秒）──
+// ── v1.5.0: 抓包改为手动控制 —— 不点「停止抓包」不停止（用户定案：要确定抓住所有包）
+//  qqfbScheduleAutoStop 保留为 no-op（闭环流程有自己的 _dumpAllRequests 开关，不依赖这里）
 static BOOL _autoStopScheduled = NO;
 static void qqfbScheduleAutoStop(void) {
+    // v1.5.0: 手动抓包模式——自动停止已禁用，抓包持续到用户点「⏹ 停止抓包」
+    return;
+#if 0
     // v1.4: 闭环执行期间禁止自动停（否则 8 秒无新响应会关抓包，导致执行后重抓 0x9172 失败）
     if (_closedLoopRunning) return;
     // 每次关键响应到达时重置 8 秒窗口；窗口内无新响应则自动停
@@ -154,6 +158,7 @@ static void qqfbScheduleAutoStop(void) {
     });
     _autoStopScheduled = YES;
     dispatch_resume(timer);
+#endif
 }
 
 // ── 提前声明 %new 方法，供 dispatch_once block 内调用 ──
@@ -2172,7 +2177,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.4.9";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.5.0";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2187,22 +2192,36 @@ static void showTaskPanel(void) {
     [panel addSubview:dragBar];
     [panel bringSubviewToFront:dragBar];
 
-    // 两个操作：打开并抓取（先开抓包再打开页面），或单独抓取当前页面。
+    // 抓包控制行（v1.5.0 三按钮：打开等级页 / 抓取 / 停止抓包）
     UIButton *openBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    openBtn.frame = CGRectMake(w - 184, 8, 78, 26);
-    [openBtn setTitle:@"🌐 打开并抓取" forState:UIControlStateNormal];
+    openBtn.frame = CGRectMake(6, 38, (w - 18) / 3, 30);
+    [openBtn setTitle:@"🌐 打开等级页" forState:UIControlStateNormal];
     [openBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    openBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+    openBtn.layer.cornerRadius = 6;
     openBtn.titleLabel.font = [UIFont systemFontOfSize:11];
     [openBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:openBtn];
 
     UIButton *captureBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    captureBtn.frame = CGRectMake(w - 108, 8, 78, 26);
+    captureBtn.frame = CGRectMake(6 + (w - 18) / 3 + 3, 38, (w - 18) / 3, 30);
     [captureBtn setTitle:@"⏺ 抓取" forState:UIControlStateNormal];
     [captureBtn setTitleColor:[UIColor systemGreenColor] forState:UIControlStateNormal];
+    captureBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+    captureBtn.layer.cornerRadius = 6;
     captureBtn.titleLabel.font = [UIFont systemFontOfSize:11];
     [captureBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:captureBtn];
+
+    UIButton *stopBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    stopBtn.frame = CGRectMake(6 + (w - 18) / 3 * 2 + 6, 38, (w - 18) / 3, 30);
+    [stopBtn setTitle:@"⏹ 停止抓包" forState:UIControlStateNormal];
+    [stopBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    stopBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+    stopBtn.layer.cornerRadius = 6;
+    stopBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    [stopBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskStopCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:stopBtn];
 
     // 关闭
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -2215,7 +2234,7 @@ static void showTaskPanel(void) {
 
     // 只获取并展示任务；不自动执行、不随机挑选任务。
     UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    runBtn.frame = CGRectMake(6, 38, (w - 18) / 2, 30);
+    runBtn.frame = CGRectMake(6, 72, (w - 18) / 2, 30);
     [runBtn setTitle:@"🔄 获取任务列表" forState:UIControlStateNormal];
     [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
@@ -2226,7 +2245,7 @@ static void showTaskPanel(void) {
 
     // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）
     UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    statusBtn.frame = CGRectMake(6 + (w - 18) / 2 + 6, 38, (w - 18) / 2, 30);
+    statusBtn.frame = CGRectMake(6 + (w - 18) / 2 + 6, 72, (w - 18) / 2, 30);
     [statusBtn setTitle:@"📊 刷新任务状态" forState:UIControlStateNormal];
     [statusBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     statusBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
@@ -2236,8 +2255,8 @@ static void showTaskPanel(void) {
     [panel addSubview:statusBtn];
 
     // 任务列表区：获取后只展示任务，执行必须由用户点击每行“测试”。
-    CGFloat listH = MIN(210, MAX(120, h - 270));
-    UIScrollView *taskScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(6, 72, w - 12, listH)];
+    CGFloat listH = MIN(210, MAX(120, h - 320));
+    UIScrollView *taskScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(6, 106, w - 12, listH)];
     taskScroll.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.08];
     taskScroll.layer.cornerRadius = 6;
     taskScroll.userInteractionEnabled = YES;
@@ -2246,15 +2265,15 @@ static void showTaskPanel(void) {
     [panel addSubview:taskScroll];
 
     // 日志区：记录抓取和用户点选的单项测试结果。
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 72, w - 12, h - 78)];
-    tv.frame = CGRectMake(6, 78 + listH, w - 12, h - 84 - listH);
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 106, w - 12, h - 78)];
+    tv.frame = CGRectMake(6, 112 + listH, w - 12, h - 118 - listH);
     tv.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1];
     tv.layer.cornerRadius = 6;
     tv.textColor = [UIColor whiteColor];
     tv.font = [UIFont systemFontOfSize:10];
     tv.editable = NO;
     tv.selectable = YES;
-    tv.text = @"iOS 等级页抓取日志：\n点「打开并抓取」会先开启抓包，再打开等级页，记录 30 秒初始化请求。\n也可以先进入页面，再点「抓取」补抓当前页面。\n\n";
+    tv.text = @"iOS 等级页抓取日志：\n点「打开等级页」进入等级页，点「抓取」开始记录所有请求（不点停止不停止）。\n0x9172 任务数据到达后自动写入 qqtask_status.json，点「获取任务列表」即可看到全量任务。\n\n";
     _logTextView = tv;
     _logView = panel;
     [panel addSubview:tv];
@@ -2424,6 +2443,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskExecCheckedTapped:(UIButton *)sender;
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender;
 - (void)_taskCaptureTapped:(UIButton *)sender;
+- (void)_taskStopCaptureTapped:(UIButton *)sender;
 - (void)_taskRunLevelTapped:(UIButton *)sender;
 - (void)_taskRefreshStatusTapped:(UIButton *)sender;
 @end
@@ -2612,44 +2632,49 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskOpenLevelPageTapped:(UIButton *)sender {
-    // 关键时序：先开启抓包，再打开等级页，确保不漏掉首轮初始化请求。
+    // v1.5.0: 只打开等级页，不自动开抓包（抓包由「抓取」手动控制，停止由「停止抓包」控制）
     if (_dumpAllRequests) {
-        appendLogView(@"[iOS抓取] 已在抓取中，请直接进入等级界面");
-        return;
+        appendLogView(@"[iOS抓取] 抓包进行中，打开等级页后将记录所有请求");
+    } else {
+        appendLogView(@"[iOS抓取] 提示：等级页将打开，如要抓包请先点「⏺ 抓取」");
     }
-    _dumpAllRequests = YES;
-    appendLogView(@"[iOS抓取] 已开启，准备打开等级页…");
-    qqlog(@"[iOS抓取] 先开抓包，再打开等级页");
-    // v1.2.22: 打开等级页即启动自动停止窗口（响应到达自动续期，8 秒无新数据自动停）
-    qqfbScheduleAutoStop();
-
     NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
     NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
     NSString *b64 = [bd base64EncodedStringWithOptions:0];
     NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
     NSURL *u = [NSURL URLWithString:deep];
     if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
-        _dumpAllRequests = NO;
         appendLogView(@"[iOS抓取] 无法拉起等级页深链");
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-        appendLogView(@"[iOS抓取] 等级页已打开，响应到达后自动停止");
-        qqlog(@"[iOS抓取] 等级页已打开，抓包窗口（响应驱动自动停止）");
+        appendLogView(@"[iOS抓取] 等级页已打开");
+        qqlog(@"[iOS抓取] 等级页已打开");
     });
 }
 %new
 - (void)_taskCaptureTapped:(UIButton *)sender {
-    // 仅抓取当前页面的真实网络流量，响应到达后自动停止（v1.2.22）。
+    // v1.5.0: 手动开启抓包，不自动停止——持续记录直到用户点「⏹ 停止抓包」
     if (_dumpAllRequests) {
-        appendLogView(@"[iOS抓取] 正在记录中，请等待当前窗口结束");
+        appendLogView(@"[iOS抓取] 已在抓包中（不点停止不停止）");
         return;
     }
     _dumpAllRequests = YES;
-    appendLogView(@"[iOS抓取] 开始只读记录（响应驱动自动停止）");
-    qqlog(@"[iOS抓取] 开始只读记录（响应驱动自动停止）");
-    qqfbScheduleAutoStop();
+    appendLogView(@"[iOS抓取] ⏺ 已开始抓包：记录所有请求，点「⏹ 停止抓包」结束");
+    qqlog(@"[iOS抓取] 手动抓包开始（不自动停止）");
+}
+
+%new
+- (void)_taskStopCaptureTapped:(UIButton *)sender {
+    // v1.5.0: 手动停止抓包
+    if (!_dumpAllRequests) {
+        appendLogView(@"[iOS抓取] 当前未在抓包");
+        return;
+    }
+    _dumpAllRequests = NO;
+    appendLogView(@"[iOS抓取] ⏹ 已停止抓包");
+    qqlog(@"[iOS抓取] 手动停止抓包");
 }
 
 %new

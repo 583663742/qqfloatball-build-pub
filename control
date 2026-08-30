@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.4.9
-Description: QQFloatBall 1.4.9 任务面板改用 0x9172 全量37任务 - TrollFools fat
+Version: 1.5.0
+Description: QQFloatBall 1.5.0 手动抓包(不点停止不停止)+打开等级页/抓取/停止三按钮
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

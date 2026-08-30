@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.4.7
-Description: QQFloatBall TrollStore fat (arm64+arm64e) - 2026-08-30 巨魔注入路线
+Version: 1.4.8
+Description: QQFloatBall TrollFools fat (arm64+arm64e) - 标准 CydiaSubstrate 依赖 2026-08-30
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

@@ -1,4 +1,4 @@
-# QQFloatBall macOS 原生构建（roothide）
+# QQFloatBall macOS 原生构建（TrollFools 注入路线，标准 CydiaSubstrate 依赖）
 name: Build QQFloatBall
 
 on:
@@ -24,31 +24,36 @@ jobs:
           mkdir -p "$THEOS/sdks"
           tar -xJf sdk/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
 
-      - name: Install ldid (needed for arm64e signing)
+      - name: Install ldid
         run: |
           brew install ldid || brew install --build-from-source ldid || (mkdir -p "$THEOS/bin" && curl -L -o "$THEOS/bin/ldid" https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 && chmod +x "$THEOS/bin/ldid" && echo "$THEOS/bin" >> $GITHUB_PATH)
 
-      - name: Verify Makefile (Apple ld64 default, no -fuse-ld=lld)
+      - name: Verify Makefile
         run: |
           grep -n "LDFLAGS" Makefile || true
           grep -n "ARCHS" Makefile || true
+          grep -n "THEOS_PACKAGE_SCHEME" Makefile || true
 
-      - name: Build package
+      - name: Build package - TrollFools standard substrate
         run: |
-          export THEOS_PACKAGE_SCHEME=roothide
-          # ★ roothidepatch symlink 必须打包进 data.tar（dpkg 解压即生效），
-          #   theos 不会自动生成，需在 make package 前手动放进 layout/
-          mkdir -p layout/Library/MobileSubstrate/DynamicLibraries
-          ln -sf /usr/lib/DynamicPatches/AutoPatches.dylib layout/Library/MobileSubstrate/DynamicLibraries/QQFloatBall.dylib.roothidepatch
+          # TrollFools 路线：不设 THEOS_PACKAGE_SCHEME=roothide！
+          # roothide scheme 让依赖变成 @loader_path/.jbroot/usr/lib/libsubstrate.dylib
+          # TrollFools 不建 .jbroot → dyld 加载闪退。标准 substrate 依赖才能被 ellekit 伪装版替代。
           make clean
           make package FINALPACKAGE=1
+
+      - name: Verify dylib deps
+        run: |
+          DYLIB=$(find .theos/obj -name "QQFloatBall.dylib" -type f | head -1)
+          echo "dylib: $DYLIB"
+          otool -L "$DYLIB" || true
 
       - name: List artifacts
         run: |
           ls -la packages/ || true
           find . -name "*.deb" -not -path "./layout/*" | head -5
 
-      - name: Upload deb + dylib
+      - name: Upload deb plus dylib
         uses: actions/upload-artifact@v4
         with:
           name: qqfloatball-build

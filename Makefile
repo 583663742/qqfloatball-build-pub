@@ -1,6 +1,6 @@
-# QQFloatBall — QQ悬浮球（roothide, Sileo/dpkg 路线）
-# 单 arch arm64e（设备上正常插件全是单 arch；fat 是 TrollStore 路线的错误结论，已废弃 2026-08-30）
-export ARCHS = arm64e
+# QQFloatBall — QQ悬浮球（TrollStore 注入路线 2026-08-30 定案：只走巨魔，不走 Sileo/dpkg）
+# fat arm64+arm64e（TrollStore 注入参考物 TrollStore_Inject.dylib 实证：fat 双 slice 可注入，thin arm64e 闪退）
+export ARCHS = arm64 arm64e
 export TARGET = iphone:clang:16.5:15.0
 export THEOS_PACKAGE_SCHEME = roothide
 

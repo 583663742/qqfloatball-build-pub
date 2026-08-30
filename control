@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.4.6
-Description: QQ floating ball - Sileo/dpkg roothide deb, single-arch arm64e, roothidepatch symlink in data.tar (v1.4.6)
+Version: 1.4.7
+Description: QQFloatBall TrollStore fat (arm64+arm64e) - 2026-08-30 巨魔注入路线
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

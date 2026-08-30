@@ -2096,7 +2096,18 @@ static void renderTaskRows(void) {
 
 // ── 刷新任务列表（拉接口 → 渲染）──
 static void refreshTaskListUI(void) {
-    // v1.2.2: 优先用客户端原生捕获的全量任务列表（QQ 自己请求带 skey 全凭证，服务端给全量）
+    // v1.4.9: 数据源优先级改为 0x9172 全量任务（iOS 等级页真全量 26+ 条，qqtask_status.json）
+    //          → 客户端 levelTask/Get 捕获（iOS 只回 10 个，安卓才全量） → 在线拉取
+    // iOS 上 levelTask/Get 有 is_ios_review_hide 审核过滤只给 10 条，必须用 0x9172 PB 的 taskId/jumpURL/status
+    NSArray *statusTasks = qqfbReadTaskStatusList();
+    if (statusTasks && statusTasks.count > 0) {
+        _taskListCache = statusTasks;
+        if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
+        appendLogView([NSString stringWithFormat:@"✅ 使用 0x9172 全量任务 %lu 个", (unsigned long)statusTasks.count]);
+        renderTaskRows();
+        return;
+    }
+    // v1.2.2: 其次用客户端原生捕获的任务列表（QQ 自己请求带 skey 全凭证）
     // v1.2.12: 不再在日志区提示「使用客户端原生全量」（用户要求静默，捕获信息由 [捕获] 日志记录）
     if (_capturedTaskList && _capturedTaskList.count > 0) {
         _taskListCache = _capturedTaskList;
@@ -2161,7 +2172,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.4.3";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.4.9";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2437,7 +2448,7 @@ __attribute__((unused)) static void showLogPanel(void) {
     int idx = (int)sender.tag;
     if (!_taskListCache || idx < 0 || idx >= (int)_taskListCache.count) return;
     NSDictionary *task = _taskListCache[idx];
-    NSString *tid = task[@"task_id"] ?: @"";
+    NSString *tid = task[@"task_id"] ?: task[@"taskId"] ?: @"";
     if (tid.length == 0) return;
     if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
     if ([_checkedTaskIds containsObject:tid]) {
@@ -2702,10 +2713,10 @@ __attribute__((unused)) static void showLogPanel(void) {
         // 再执行额外活跃任务组
         for (NSDictionary *task in _taskListCache) {
             if (![task isKindOfClass:[NSDictionary class]]) continue;
-            NSString *tid = task[@"task_id"] ?: @"";
+            NSString *tid = task[@"task_id"] ?: task[@"taskId"] ?: @"";
             if (!tid || ![_checkedTaskIds containsObject:tid]) continue;
             NSString *title = task[@"title"] ?: @"?";
-            qqlog(@"[任务] ── 执行: %@ ──", title);
+            qqlog(@"[任务] ── 执行: %@ (tid=%@) ──", title, tid);
             execTaskByTitle(title, uin);
             [NSThread sleepForTimeInterval:2];
         }

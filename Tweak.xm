@@ -953,14 +953,18 @@ __attribute__((unused)) static void dumpWebKitCookies(void) {
 //   3. 福利社领券链   → GetBenefitsDetail → ExecAct → GetUserItemsByBenefits
 // ══════════════════════════════════════════
 
-// ── hash33 算法：bkn = hash33(p_skey)（经典版，已在 iOS 实锤可用）──
+// ── hash33 算法：bkn/g_tk = hash33(key)（qsped_chain.py 同源，实锤版）──
+//  2026-08-31 修正：原实现初始值 0 + 仅最后截断，与 qsped 每步截断版不等价，
+//  导致 qun 域 robots_addfriend bkn 校验失败（csrf error 100021）。
+//  实证：hash33('MuiZBP9BQR')=1081171642、hash33('MDzKvUD1zB')=469881207
+//  均与安卓抓包 bkn 一致；qun 域 bkn 用 skey 算（不是 p_skey）。
 static int hash33(NSString *str) {
     if (!str) return 0;
-    int e = 0;
+    long long e = 5381;
     for (NSUInteger i = 0; i < str.length; i++) {
-        e += (e << 5) + [str characterAtIndex:i];
+        e = ((e + (e << 5)) & 0x7fffffff) + [str characterAtIndex:i];
     }
-    return 2147483647 & e;
+    return (int)(e & 0x7fffffff);
 }
 
 // ── ZZC sign（QQ音乐 musics.fcg 请求签名，qsped_chain.py 同源 16/16 验证）──
@@ -1187,6 +1191,17 @@ static NSString *httpPostText(NSString *url, NSString *bodyString, NSString *con
 static NSString *getSkey(NSString *uin) {
     @try {
         for (NSString *domain in @[@"qq.com", @"", @"web.qun.qq.com"]) {
+            NSString *sk = getPskey(domain, uin, 0);
+            if (sk && sk.length > 0) return sk;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+// ── qun 域 skey：robots_addfriend/removefriend 的 bkn=hash33(qun域skey)（qsped 抓包实证）──
+static NSString *getQunSkey(NSString *uin) {
+    @try {
+        for (NSString *domain in @[@"web.qun.qq.com", @"qun.qq.com", @"qq.com", @""]) {
             NSString *sk = getPskey(domain, uin, 0);
             if (sk && sk.length > 0) return sk;
         }
@@ -1445,7 +1460,19 @@ static BOOL runDailySignTask(NSString *uin) {
     if (!resp) { qqlog(@"[任务] 日签卡 无响应"); return NO; }
     qqlog(@"[任务] 日签卡 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
     if ([resp containsString:@"__ERR__"]) { qqlog(@"[任务] 日签卡 网络错误"); return NO; }
-    // 响应含 errCode/ret：0 或成功标志
+    // 2026-08-31 实测：ret:0 但 data.retCode:-1 = 未真正打卡（可能今日已打/条件不满足），
+    // 必须解析 data.retCode==0 才算成功
+    NSRange rcRange = [resp rangeOfString:@"\"retCode\":"];
+    if (rcRange.location != NSNotFound) {
+        NSString *tail = [resp substringFromIndex:NSMaxRange(rcRange)];
+        int rc = 0;
+        NSScanner *sc = [NSScanner scannerWithString:tail];
+        if ([sc scanInt:&rc]) {
+            if (rc == 0) { qqlog(@"[任务] 日签卡 打卡成功 retCode=0"); return YES; }
+            qqlog(@"[任务] 日签卡 服务端拒绝 retCode=%d（可能今日已打卡/条件不满足）", rc);
+            return NO;
+        }
+    }
     return !([resp containsString:@"\"ret\":-"] || [resp containsString:@"\"code\":-"] || [resp containsString:@"\"errCode\":-"]);
 }
 
@@ -1460,10 +1487,16 @@ static BOOL runAddFriendTask(NSString *uin, NSString *targetUin) {
     if (!pskey) pskey = getPskey(@"qun.qq.com", uin, 1);
     if (!pskey) pskey = getPskey(@"web.qun.qq.com", uin, 1);
     if (!pskey) { qqlog(@"[任务] 加好友 拿不到 qun 域 p_skey"); return NO; }
-    int bkn = hash33(pskey);
-    NSString *url = [NSString stringWithFormat:@"https://web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_addfriend?bkn=%d", bkn];
+    NSString *qskey = getQunSkey(uin);
+    if (!qskey) qskey = getSkey(uin);
+    if (!qskey) { qqlog(@"[任务] 加好友 拿不到 qun 域 skey"); return NO; }
+    // bkn=hash33(skey)（qsped 抓包实证：hash33('MDzKvUD1zB')=469881207），不是 p_skey！
+    int bkn = hash33(qskey);
+    qqlog(@"[任务] 加好友 qun域skey=%@ bkn=%d", qskey, bkn);
+    NSString *url = [NSString stringWithFormat:@"/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_addfriend?bkn=%d", bkn];
+    url = [@"https://web.qun.qq.com" stringByAppendingString:url];
     NSString *cookie = [NSString stringWithFormat:@"skey=%@; uin=o%@; p_uin=o%@; p_skey=%@",
-                        (getSkey(uin) ?: @""), uin, uin, pskey];
+                        qskey, uin, uin, pskey];
     NSDictionary *extra = @{
         @"qname-service": @"976321:131072",
         @"qname-space": @"Production",
@@ -1487,10 +1520,15 @@ static BOOL runRemoveFriendTask(NSString *uin, NSString *targetUin) {
     if (!pskey) pskey = getPskey(@"qun.qq.com", uin, 1);
     if (!pskey) pskey = getPskey(@"web.qun.qq.com", uin, 1);
     if (!pskey) { qqlog(@"[任务] 删好友 拿不到 qun 域 p_skey"); return NO; }
-    int bkn = hash33(pskey);
-    NSString *url = [NSString stringWithFormat:@"https://web.qun.qq.com/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_removefriend?bkn=%d", bkn];
+    NSString *qskey = getQunSkey(uin);
+    if (!qskey) qskey = getSkey(uin);
+    if (!qskey) { qqlog(@"[任务] 删好友 拿不到 qun 域 skey"); return NO; }
+    int bkn = hash33(qskey);
+    qqlog(@"[任务] 删好友 qun域skey=%@ bkn=%d", qskey, bkn);
+    NSString *url = [NSString stringWithFormat:@"/qunrobot/proxy/domain/qun.qq.com/cgi-bin/qunapp/robots_removefriend?bkn=%d", bkn];
+    url = [@"https://web.qun.qq.com" stringByAppendingString:url];
     NSString *cookie = [NSString stringWithFormat:@"skey=%@; uin=o%@; p_uin=o%@; p_skey=%@",
-                        (getSkey(uin) ?: @""), uin, uin, pskey];
+                        qskey, uin, uin, pskey];
     NSDictionary *extra = @{
         @"qname-service": @"976321:131072",
         @"qname-space": @"Production",
@@ -1540,6 +1578,22 @@ static BOOL runCoinExchangeTask(NSString *uin) {
     NSString *resp = httpPostText(url, bodyStr, @"application/json", cookie, extra, 15);
     if (!resp) { qqlog(@"[任务] 金币兑换 无响应"); return NO; }
     qqlog(@"[任务] 金币兑换 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
+    // 2026-08-31 实测：外层 code:0 但 req_0.code:1000 = 兑换业务失败，必须解析 req_0.code
+    NSRange r0Range = [resp rangeOfString:@"\"req_0\":"];
+    if (r0Range.location != NSNotFound) {
+        NSString *tail = [resp substringFromIndex:NSMaxRange(r0Range)];
+        NSRange codeRange = [tail rangeOfString:@"\"code\":"];
+        if (codeRange.location != NSNotFound) {
+            NSString *ctail = [tail substringFromIndex:NSMaxRange(codeRange)];
+            int rc = 0;
+            NSScanner *sc = [NSScanner scannerWithString:ctail];
+            if ([sc scanInt:&rc]) {
+                if (rc == 0) { qqlog(@"[任务] 金币兑换 兑换成功 req_0.code=0"); return YES; }
+                qqlog(@"[任务] 金币兑换 服务端拒绝 req_0.code=%d（无金币/已兑换/参数错）", rc);
+                return NO;
+            }
+        }
+    }
     return YES;
 }
 
@@ -1977,7 +2031,7 @@ static void runClosedLoopTasks(void) {
     });
 }
 
-// ── 一键自动任务（v1.6.0：改造指引第一版——HTTP 直调可完成的任务）──
+// ── 一键自动任务（v1.6.1：改造指引第一版——HTTP 直调可完成的任务）──
 //  iOS 插件注入 QQ 进程内 = 天然同源（进程内现取分域 p_skey，2026-08-19 实测 levelTask/Get 直调可行，
 //  不踩安卓 Qsped 的 -3000 死路——那是独立 app 无登录态的问题）。改造指引任务 2 的 Native 拦截 openKuikly
 //  在 iOS 实测判死（task-center 网页版自动跳 Kuikly，拦截后页面又跳走，见 kuikly-pivot reference），第一版不做。
@@ -1993,7 +2047,7 @@ static void runAutoHttpTasks(void) {
     _closedLoopRunning = YES;   // 暂停抓包自动停止（v1.5.0 已是 no-op，双保险）
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.0）──");
+            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.1）──");
 
             // 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等新数据（执行前快照）
             double oldTs = qqfbStatusCapturedAt();
@@ -2271,7 +2325,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.6.0";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.6.1";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2337,7 +2391,7 @@ static void showTaskPanel(void) {
     [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:runBtn];
 
-    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.0 一键自动任务
+    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.1 一键自动任务
     UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     statusBtn.frame = CGRectMake(6 + (w - 18) / 3 + 3, 72, (w - 18) / 3, 30);
     [statusBtn setTitle:@"📊 刷新状态" forState:UIControlStateNormal];
@@ -2348,7 +2402,7 @@ static void showTaskPanel(void) {
     [statusBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshStatusTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:statusBtn];
 
-    // v1.6.0: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比验收）
+    // v1.6.1: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比验收）
     UIButton *autoBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     autoBtn.frame = CGRectMake(6 + (w - 18) / 3 * 2 + 6, 72, (w - 18) / 3, 30);
     [autoBtn setTitle:@"🚀 一键任务" forState:UIControlStateNormal];
@@ -2665,7 +2719,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskAutoRunTapped:(UIButton *)sender {
-    // v1.6.0: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
+    // v1.6.1: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
     appendLogView(@"🚀 一键自动任务启动…（详见日志：日签卡/加好友/金币兑换 + 0x9172 回查）");
     runAutoHttpTasks();
 }

@@ -45,7 +45,7 @@ static NSArray *_capturedTaskList = nil;
 static BOOL _capturedListDirty = NO;
 // ── 客户端原生请求捕获的 qun 域真实 p_skey（v1.2.2 修复加好友 csrf error）──
 static NSString *_capturedQunPskey = nil;
-// ── 客户端原生请求捕获的全局 skey（v1.6.3：qun 域 bkn=hash33(skey)，getLocalKeyOfDomain 拿不到 skey）──
+// ── 客户端原生请求捕获的全局 skey（v1.6.4：qun 域 bkn=hash33(skey)，getLocalKeyOfDomain 拿不到 skey）──
 static NSString *_capturedSkey = nil;
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
@@ -299,7 +299,7 @@ static void qqfbScheduleAutoStop(void) {
             return %orig(request, wrapped);
         }
         // v1.2.2: 顺带捕获 qun 域真实 p_skey（客户端访问群/好友页时带真实凭证，修复加好友 csrf error）
-        // v1.6.3: 顺带捕获全局 skey（qun 域 bkn=hash33(skey)，加好友必需）
+        // v1.6.4: 顺带捕获全局 skey（qun 域 bkn=hash33(skey)，加好友必需）
         if ([url containsString:@"qun.qq.com"] && request.allHTTPHeaderFields[@"Cookie"]) {
             NSString *ck = request.allHTTPHeaderFields[@"Cookie"];
             NSArray *parts = [ck componentsSeparatedByString:@";"];
@@ -319,6 +319,8 @@ static void qqfbScheduleAutoStop(void) {
                     }
                 }
             }
+            // v1.6.4: 诊断——打印 qun 域请求完整 Cookie（确认 skey/p_skey 真实值）
+            qqlog(@"[捕获] qun请求Cookie: %@", ck.length > 400 ? [ck substringToIndex:400] : ck);
         }
         // v1.2.3: qqlevel 相关无条件记录 URL（找"额外活跃"33任务的真实接口，级别Get已在上方拦截）
         if ([url containsString:@"qqlevel"] && !isLevelGet) {
@@ -1221,7 +1223,7 @@ static NSString *getRealSkey(void) {
 }
 
 static NSString *getSkey(NSString *uin) {
-    // v1.6.3: ①客户端原生请求捕获的 skey 最可靠；②getRealSig_SKEYStr；③getLocalKeyOfDomain 兜底
+    // v1.6.4: ①客户端原生请求捕获的 skey 最可靠；②getRealSig_SKEYStr；③getLocalKeyOfDomain 兜底
     if (_capturedSkey && _capturedSkey.length > 0) {
         qqlog(@"[skey] 用客户端捕获 skey (len=%lu)", (unsigned long)_capturedSkey.length);
         return _capturedSkey;
@@ -1239,7 +1241,7 @@ static NSString *getSkey(NSString *uin) {
 
 // ── qun 域 skey：robots_addfriend/removefriend 的 bkn=hash33(qun域skey)（qsped 抓包实证）──
 static NSString *getQunSkey(NSString *uin) {
-    // v1.6.3: ①客户端捕获 skey；②getRealSig_SKEYStr；③getLocalKeyOfDomain 各域各 kt 兜底
+    // v1.6.4: ①客户端捕获 skey；②getRealSig_SKEYStr；③getLocalKeyOfDomain 各域各 kt 兜底
     if (_capturedSkey && _capturedSkey.length > 0) {
         qqlog(@"[skey] qun域用客户端捕获 skey (len=%lu)", (unsigned long)_capturedSkey.length);
         return _capturedSkey;
@@ -1557,7 +1559,23 @@ static BOOL runAddFriendTask(NSString *uin, NSString *targetUin) {
     NSString *resp = httpPostText(url, body, @"application/x-www-form-urlencoded", cookie, extra, 15);
     if (!resp) { qqlog(@"[任务] 加好友 无响应"); return NO; }
     qqlog(@"[任务] 加好友 响应: %@", resp.length > 500 ? [resp substringToIndex:500] : resp);
-    return YES; // 结果判断等真实响应后定
+    // v1.6.4: 成功判据——cgicode/retcode 必须为 0（实测 100000 login error / 100021 csrf 都算失败）
+    @try {
+        NSRange r1 = [resp rangeOfString:@"\"cgicode\":"];
+        if (r1.location != NSNotFound) {
+            NSString *tail = [resp substringFromIndex:NSMaxRange(r1)];
+            int rc = 0;
+            NSScanner *sc = [NSScanner scannerWithString:tail];
+            if ([sc scanInt:&rc]) {
+                if (rc == 0) { qqlog(@"[任务] 加好友 成功 cgicode=0"); return YES; }
+                qqlog(@"[任务] 加好友 服务端拒绝 cgicode=%d（100000=login error 凭证无效/100021=csrf）", rc);
+                return NO;
+            }
+        }
+    } @catch (NSException *e) {
+        qqlog(@"[任务] 加好友 判据解析异常 %@", e);
+    }
+    return YES; // 无 cgicode 字段（如纯 HTML/非 JSON）时保守放行
 }
 
 // ── 删好友（纯后台，测试模式收尾用）──
@@ -2079,7 +2097,7 @@ static void runClosedLoopTasks(void) {
     });
 }
 
-// ── 一键自动任务（v1.6.3：改造指引第一版——HTTP 直调可完成的任务）──
+// ── 一键自动任务（v1.6.4：改造指引第一版——HTTP 直调可完成的任务）──
 //  iOS 插件注入 QQ 进程内 = 天然同源（进程内现取分域 p_skey，2026-08-19 实测 levelTask/Get 直调可行，
 //  不踩安卓 Qsped 的 -3000 死路——那是独立 app 无登录态的问题）。改造指引任务 2 的 Native 拦截 openKuikly
 //  在 iOS 实测判死（task-center 网页版自动跳 Kuikly，拦截后页面又跳走，见 kuikly-pivot reference），第一版不做。
@@ -2095,7 +2113,7 @@ static void runAutoHttpTasks(void) {
     _closedLoopRunning = YES;   // 暂停抓包自动停止（v1.5.0 已是 no-op，双保险）
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.3）──");
+            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.4）──");
 
             // 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等新数据（执行前快照）
             double oldTs = qqfbStatusCapturedAt();
@@ -2383,7 +2401,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ QQ等级助手 v1.6.3";
+    titleLb.text = @"⚡ QQ等级助手 v1.6.4";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2431,7 +2449,7 @@ static void showTaskPanel(void) {
     [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:runBtn];
 
-    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.3 一键自动任务
+    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.4 一键自动任务
     UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     statusBtn.frame = CGRectMake(9 + (w - 15) / 2, 120, (w - 15) / 2, 30);
     [statusBtn setTitle:@"📊 刷新状态" forState:UIControlStateNormal];
@@ -2781,7 +2799,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskAutoRunTapped:(UIButton *)sender {
-    // v1.6.3: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
+    // v1.6.4: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
     appendLogView(@"🚀 一键自动任务启动…（详见日志：日签卡/加好友/金币兑换 + 0x9172 回查）");
     runAutoHttpTasks();
 }

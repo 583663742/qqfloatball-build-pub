@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.5.0
-Description: QQFloatBall 1.5.0 手动抓包(不点停止不停止)+打开等级页/抓取/停止三按钮
+Version: 1.6.0
+Description: QQFloatBall 1.6.0 一键自动任务(日签卡/加好友/金币兑换 HTTP直调)+0x9172状态回查
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

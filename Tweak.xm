@@ -1977,6 +1977,100 @@ static void runClosedLoopTasks(void) {
     });
 }
 
+// ── 一键自动任务（v1.6.0：改造指引第一版——HTTP 直调可完成的任务）──
+//  iOS 插件注入 QQ 进程内 = 天然同源（进程内现取分域 p_skey，2026-08-19 实测 levelTask/Get 直调可行，
+//  不踩安卓 Qsped 的 -3000 死路——那是独立 app 无登录态的问题）。改造指引任务 2 的 Native 拦截 openKuikly
+//  在 iOS 实测判死（task-center 网页版自动跳 Kuikly，拦截后页面又跳走，见 kuikly-pivot reference），第一版不做。
+//  第一版只做改造指引第五节"能 HTTP 持久完成"的：日签卡打卡(SignIn) / 加好友(robots_addfriend) / 金币兑换(musics.fcg)。
+//  执行前开抓包→打开等级页拿 0x9172 快照；执行后回等级页重抓 0x9172 对比 status 验收（不盲赌）。
+static void runAutoHttpTasks(void) __attribute__((unused));
+static void runAutoHttpTasks(void) {
+    if (_levelTasksRunning) {
+        appendLogView(@"⚠️ 任务已在执行中，请勿重复点击");
+        return;
+    }
+    _levelTasksRunning = YES;
+    _closedLoopRunning = YES;   // 暂停抓包自动停止（v1.5.0 已是 no-op，双保险）
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.0）──");
+
+            // 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等新数据（执行前快照）
+            double oldTs = qqfbStatusCapturedAt();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                _dumpAllRequests = YES;
+                openLevelPage();
+            });
+            if (!qqfbWaitStatusRefresh(oldTs, 15)) {
+                qqlog(@"[自动任务] ⚠️ 15 秒内未抓到新 0x9172（等级页可能未打开/数据未变），继续执行但回查可能失败");
+            }
+            NSArray *taskList = qqfbReadTaskStatusList();
+            if (!taskList || taskList.count == 0) {
+                qqlog(@"[自动任务] ❌ 没有任务数据，请先手动打开等级页一次");
+                return;
+            }
+            NSMutableDictionary *beforeStatus = [NSMutableDictionary dictionary];
+            for (NSDictionary *t in taskList) {
+                NSString *tid = t[@"taskId"] ?: t[@"task_id"] ?: @"";
+                NSString *title = t[@"title"] ?: @"?";
+                if (tid.length) beforeStatus[tid] = @{@"title": title, @"status": t[@"status"] ?: @(-1)};
+            }
+
+            NSString *uin = getCurrentUin();
+            qqlog(@"[自动任务] 当前 uin=%@，0x9172 共 %lu 个任务", uin, (unsigned long)taskList.count);
+
+            int okN = 0, failN = 0, skipN = 0;
+
+            // 2. 日签卡打卡（ti 域 SignIn，改造指引第五节：能 HTTP 持久完成）
+            qqlog(@"[自动任务] ── [1/3] 日签卡打卡（ti.qq.com/hybrid-h5 SignIn）──");
+            if (runDailySignTask(uin)) { okN++; qqlog(@"[自动任务] ✅ 日签卡打卡 接口返回成功"); }
+            else { failN++; qqlog(@"[自动任务] ❌ 日签卡打卡 失败（见上面响应日志）"); }
+
+            // 3. 加好友（qun 域 robots_addfriend）
+            qqlog(@"[自动任务] ── [2/3] 加好友（%@，qun 域 robots_addfriend）──", _friendRobotUin);
+            if (runAddFriendTask(uin, _friendRobotUin)) { okN++; qqlog(@"[自动任务] ✅ 加好友 接口返回成功"); }
+            else { failN++; qqlog(@"[自动任务] ❌ 加好友 失败（见上面响应日志）"); }
+
+            // 4. 金币兑换等级加速（musics.fcg，需 qm_keyst；iOS QQ 内可能没有 QQ 音乐登录态 → 自动跳过不算失败）
+            qqlog(@"[自动任务] ── [3/3] 金币兑换等级加速（musics.fcg）──");
+            if (runCoinExchangeTask(uin)) { okN++; qqlog(@"[自动任务] ✅ 金币兑换 接口返回成功"); }
+            else { skipN++; qqlog(@"[自动任务] ⏭ 金币兑换 跳过（无 qm_keyst 或接口失败，详见上面日志）"); }
+
+            // 5. 执行后：回等级页触发新 0x9172 → 对比 status（验收：0/1 → 1/2 才算真完成）
+            qqlog(@"[自动任务] 执行完毕，回等级页重抓 0x9172 回查状态…");
+            double t0 = qqfbStatusCapturedAt();
+            dispatch_async(dispatch_get_main_queue(), ^{ openLevelPage(); });
+            BOOL got = qqfbWaitStatusRefresh(t0, 20);
+            int pushedN = 0;
+            if (got) {
+                NSArray *newList = qqfbReadTaskStatusList();
+                for (NSString *tid in beforeStatus) {
+                    int before = [beforeStatus[tid][@"status"] intValue];
+                    int after = qqfbFindTaskStatusIn(newList ?: @[], tid, beforeStatus[tid][@"title"]);
+                    if (before == 0 && after == 1) {
+                        pushedN++;
+                        qqlog(@"[自动任务] ✅ [完成] %@ %d → %d", beforeStatus[tid][@"title"], before, after);
+                    } else if (before != after && after >= 0) {
+                        qqlog(@"[自动任务] ℹ️ [变化] %@ %d → %d", beforeStatus[tid][@"title"], before, after);
+                    }
+                }
+                if (pushedN == 0) {
+                    qqlog(@"[自动任务] ⚠️ 回查无 status 推进（0→1）——HTTP 接口虽返回成功，但服务端可能未记账（ad 埋点类任务需真实交互）");
+                }
+            } else {
+                qqlog(@"[自动任务] ⚠️ 执行后未抓到新 0x9172（等级页可能未打开），请点「📊 刷新任务状态」人工复核");
+            }
+
+            qqlog(@"[自动任务] ── 一键自动任务结束：接口成功 %d / 失败 %d / 跳过 %d / status推进 %d ──", okN, failN, skipN, pushedN);
+        } @catch (NSException *e) {
+            qqlog(@"[自动任务] 异常 %@", e);
+        }
+        _closedLoopRunning = NO;
+        _levelTasksRunning = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{ _dumpAllRequests = NO; });
+    });
+}
+
 // ── 任务状态文案 ──
 static NSString *taskStatusText(NSDictionary *task) {
     NSNumber *s = task[@"status"];
@@ -2177,7 +2271,7 @@ static void showTaskPanel(void) {
 
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.5.0";
+    titleLb.text = @"⚡ iOS等级页抓取 v1.6.0";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2234,25 +2328,36 @@ static void showTaskPanel(void) {
 
     // 只获取并展示任务；不自动执行、不随机挑选任务。
     UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    runBtn.frame = CGRectMake(6, 72, (w - 18) / 2, 30);
-    [runBtn setTitle:@"🔄 获取任务列表" forState:UIControlStateNormal];
+    runBtn.frame = CGRectMake(6, 72, (w - 18) / 3, 30);
+    [runBtn setTitle:@"🔄 获取任务" forState:UIControlStateNormal];
     [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
     runBtn.layer.cornerRadius = 6;
-    runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:runBtn];
 
-    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）
+    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.0 一键自动任务
     UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    statusBtn.frame = CGRectMake(6 + (w - 18) / 2 + 6, 72, (w - 18) / 2, 30);
-    [statusBtn setTitle:@"📊 刷新任务状态" forState:UIControlStateNormal];
+    statusBtn.frame = CGRectMake(6 + (w - 18) / 3 + 3, 72, (w - 18) / 3, 30);
+    [statusBtn setTitle:@"📊 刷新状态" forState:UIControlStateNormal];
     [statusBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     statusBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
     statusBtn.layer.cornerRadius = 6;
-    statusBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    statusBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     [statusBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshStatusTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:statusBtn];
+
+    // v1.6.0: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比验收）
+    UIButton *autoBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    autoBtn.frame = CGRectMake(6 + (w - 18) / 3 * 2 + 6, 72, (w - 18) / 3, 30);
+    [autoBtn setTitle:@"🚀 一键任务" forState:UIControlStateNormal];
+    [autoBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    autoBtn.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.9];
+    autoBtn.layer.cornerRadius = 6;
+    autoBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [autoBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskAutoRunTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:autoBtn];
 
     // 任务列表区：获取后只展示任务，执行必须由用户点击每行“测试”。
     CGFloat listH = MIN(210, MAX(120, h - 320));
@@ -2556,6 +2661,13 @@ __attribute__((unused)) static void showLogPanel(void) {
     } @catch (NSException *e) {
         appendLogView([NSString stringWithFormat:@"📊 显示异常：%@", e]);
     }
+}
+
+%new
+- (void)_taskAutoRunTapped:(UIButton *)sender {
+    // v1.6.0: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
+    appendLogView(@"🚀 一键自动任务启动…（详见日志：日签卡/加好友/金币兑换 + 0x9172 回查）");
+    runAutoHttpTasks();
 }
 
 %new

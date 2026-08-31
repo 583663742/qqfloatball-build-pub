@@ -45,7 +45,7 @@ static NSArray *_capturedTaskList = nil;
 static BOOL _capturedListDirty = NO;
 // ── 客户端原生请求捕获的 qun 域真实 p_skey（v1.2.2 修复加好友 csrf error）──
 static NSString *_capturedQunPskey = nil;
-// ── 客户端原生请求捕获的全局 skey（v1.6.2：qun 域 bkn=hash33(skey)，getLocalKeyOfDomain 拿不到 skey）──
+// ── 客户端原生请求捕获的全局 skey（v1.6.3：qun 域 bkn=hash33(skey)，getLocalKeyOfDomain 拿不到 skey）──
 static NSString *_capturedSkey = nil;
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
@@ -299,7 +299,7 @@ static void qqfbScheduleAutoStop(void) {
             return %orig(request, wrapped);
         }
         // v1.2.2: 顺带捕获 qun 域真实 p_skey（客户端访问群/好友页时带真实凭证，修复加好友 csrf error）
-        // v1.6.2: 顺带捕获全局 skey（qun 域 bkn=hash33(skey)，加好友必需）
+        // v1.6.3: 顺带捕获全局 skey（qun 域 bkn=hash33(skey)，加好友必需）
         if ([url containsString:@"qun.qq.com"] && request.allHTTPHeaderFields[@"Cookie"]) {
             NSString *ck = request.allHTTPHeaderFields[@"Cookie"];
             NSArray *parts = [ck componentsSeparatedByString:@";"];
@@ -1221,7 +1221,7 @@ static NSString *getRealSkey(void) {
 }
 
 static NSString *getSkey(NSString *uin) {
-    // v1.6.2: ①客户端原生请求捕获的 skey 最可靠；②getRealSig_SKEYStr；③getLocalKeyOfDomain 兜底
+    // v1.6.3: ①客户端原生请求捕获的 skey 最可靠；②getRealSig_SKEYStr；③getLocalKeyOfDomain 兜底
     if (_capturedSkey && _capturedSkey.length > 0) {
         qqlog(@"[skey] 用客户端捕获 skey (len=%lu)", (unsigned long)_capturedSkey.length);
         return _capturedSkey;
@@ -1239,7 +1239,7 @@ static NSString *getSkey(NSString *uin) {
 
 // ── qun 域 skey：robots_addfriend/removefriend 的 bkn=hash33(qun域skey)（qsped 抓包实证）──
 static NSString *getQunSkey(NSString *uin) {
-    // v1.6.2: ①客户端捕获 skey；②getRealSig_SKEYStr；③getLocalKeyOfDomain 各域各 kt 兜底
+    // v1.6.3: ①客户端捕获 skey；②getRealSig_SKEYStr；③getLocalKeyOfDomain 各域各 kt 兜底
     if (_capturedSkey && _capturedSkey.length > 0) {
         qqlog(@"[skey] qun域用客户端捕获 skey (len=%lu)", (unsigned long)_capturedSkey.length);
         return _capturedSkey;
@@ -2079,7 +2079,7 @@ static void runClosedLoopTasks(void) {
     });
 }
 
-// ── 一键自动任务（v1.6.2：改造指引第一版——HTTP 直调可完成的任务）──
+// ── 一键自动任务（v1.6.3：改造指引第一版——HTTP 直调可完成的任务）──
 //  iOS 插件注入 QQ 进程内 = 天然同源（进程内现取分域 p_skey，2026-08-19 实测 levelTask/Get 直调可行，
 //  不踩安卓 Qsped 的 -3000 死路——那是独立 app 无登录态的问题）。改造指引任务 2 的 Native 拦截 openKuikly
 //  在 iOS 实测判死（task-center 网页版自动跳 Kuikly，拦截后页面又跳走，见 kuikly-pivot reference），第一版不做。
@@ -2095,7 +2095,7 @@ static void runAutoHttpTasks(void) {
     _closedLoopRunning = YES;   // 暂停抓包自动停止（v1.5.0 已是 no-op，双保险）
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.2）──");
+            qqlog(@"[自动任务] ── 一键自动任务开始（v1.6.3）──");
 
             // 1. 执行前：开抓包 + 打开等级页触发 0x9172 → 等新数据（执行前快照）
             double oldTs = qqfbStatusCapturedAt();
@@ -2365,15 +2365,25 @@ static void showTaskPanel(void) {
     CGFloat y = safeTopInset() + 70;
     CGFloat h = MIN(480, frame.size.height - y - 40);
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(frame.size.width - w - 8, y, w, h)];
-    panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+    panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
     panel.layer.cornerRadius = 14;
     panel.layer.masksToBounds = YES;
     panel.userInteractionEnabled = YES;
     _taskPanel = panel;
 
+    // 分区标签 helper（小灰字，分隔功能区）
+    UILabel * (^sectionLabel)(CGFloat sy, NSString *text) = ^UILabel *(CGFloat sy, NSString *text) {
+        UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(12, sy, w - 24, 16)];
+        lb.text = text;
+        lb.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.55];
+        lb.font = [UIFont systemFontOfSize:10];
+        [panel addSubview:lb];
+        return lb;
+    };
+
     // 标题栏
     UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ iOS等级页抓取 v1.6.2";
+    titleLb.text = @"⚡ QQ等级助手 v1.6.3";
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];
@@ -2388,37 +2398,6 @@ static void showTaskPanel(void) {
     [panel addSubview:dragBar];
     [panel bringSubviewToFront:dragBar];
 
-    // 抓包控制行（v1.5.0 三按钮：打开等级页 / 抓取 / 停止抓包）
-    UIButton *openBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    openBtn.frame = CGRectMake(6, 38, (w - 18) / 3, 30);
-    [openBtn setTitle:@"🌐 打开等级页" forState:UIControlStateNormal];
-    [openBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    openBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
-    openBtn.layer.cornerRadius = 6;
-    openBtn.titleLabel.font = [UIFont systemFontOfSize:11];
-    [openBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:openBtn];
-
-    UIButton *captureBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    captureBtn.frame = CGRectMake(6 + (w - 18) / 3 + 3, 38, (w - 18) / 3, 30);
-    [captureBtn setTitle:@"⏺ 抓取" forState:UIControlStateNormal];
-    [captureBtn setTitleColor:[UIColor systemGreenColor] forState:UIControlStateNormal];
-    captureBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
-    captureBtn.layer.cornerRadius = 6;
-    captureBtn.titleLabel.font = [UIFont systemFontOfSize:11];
-    [captureBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:captureBtn];
-
-    UIButton *stopBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    stopBtn.frame = CGRectMake(6 + (w - 18) / 3 * 2 + 6, 38, (w - 18) / 3, 30);
-    [stopBtn setTitle:@"⏹ 停止抓包" forState:UIControlStateNormal];
-    [stopBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-    stopBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
-    stopBtn.layer.cornerRadius = 6;
-    stopBtn.titleLabel.font = [UIFont systemFontOfSize:11];
-    [stopBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskStopCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:stopBtn];
-
     // 关闭
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     closeBtn.frame = CGRectMake(w - 30, 8, 24, 26);
@@ -2428,42 +2407,77 @@ static void showTaskPanel(void) {
     [closeBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:closeBtn];
 
-    // 只获取并展示任务；不自动执行、不随机挑选任务。
-    UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    runBtn.frame = CGRectMake(6, 72, (w - 18) / 3, 30);
-    [runBtn setTitle:@"🔄 获取任务" forState:UIControlStateNormal];
-    [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
-    runBtn.layer.cornerRadius = 6;
-    runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:runBtn];
-
-    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.2 一键自动任务
-    UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    statusBtn.frame = CGRectMake(6 + (w - 18) / 3 + 3, 72, (w - 18) / 3, 30);
-    [statusBtn setTitle:@"📊 刷新状态" forState:UIControlStateNormal];
-    [statusBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    statusBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
-    statusBtn.layer.cornerRadius = 6;
-    statusBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    [statusBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshStatusTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:statusBtn];
-
-    // v1.6.2: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比验收）
+    // ══ 分区1：一键任务（主功能，最醒目）══
+    sectionLabel(42, @"🚀 一键任务");
     UIButton *autoBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    autoBtn.frame = CGRectMake(6 + (w - 18) / 3 * 2 + 6, 72, (w - 18) / 3, 30);
-    [autoBtn setTitle:@"🚀 一键任务" forState:UIControlStateNormal];
+    autoBtn.frame = CGRectMake(6, 60, w - 12, 36);
+    [autoBtn setTitle:@"🚀 一键自动任务（日签卡/加好友/金币兑换）" forState:UIControlStateNormal];
     [autoBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    autoBtn.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.9];
-    autoBtn.layer.cornerRadius = 6;
+    autoBtn.backgroundColor = [UIColor systemOrangeColor];
+    autoBtn.layer.cornerRadius = 8;
     autoBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     [autoBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskAutoRunTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:autoBtn];
 
-    // 任务列表区：获取后只展示任务，执行必须由用户点击每行“测试”。
-    CGFloat listH = MIN(210, MAX(120, h - 320));
-    UIScrollView *taskScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(6, 106, w - 12, listH)];
+    // ══ 分区2：任务状态 ══
+    sectionLabel(102, @"📋 任务状态");
+    UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    runBtn.frame = CGRectMake(6, 120, (w - 15) / 2, 30);
+    [runBtn setTitle:@"🔄 获取任务" forState:UIControlStateNormal];
+    [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
+    runBtn.layer.cornerRadius = 6;
+    runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:runBtn];
+
+    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.3 一键自动任务
+    UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    statusBtn.frame = CGRectMake(9 + (w - 15) / 2, 120, (w - 15) / 2, 30);
+    [statusBtn setTitle:@"📊 刷新状态" forState:UIControlStateNormal];
+    [statusBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    statusBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
+    statusBtn.layer.cornerRadius = 6;
+    statusBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    [statusBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshStatusTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:statusBtn];
+
+    // ══ 分区3：抓包调试（排查用，弱化）══
+    sectionLabel(156, @"🔧 抓包调试");
+    UIButton *openBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    openBtn.frame = CGRectMake(6, 174, (w - 18) / 3, 26);
+    [openBtn setTitle:@"🌐 打开等级页" forState:UIControlStateNormal];
+    [openBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    openBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+    openBtn.layer.cornerRadius = 6;
+    openBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    [openBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskOpenLevelPageTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:openBtn];
+
+    UIButton *captureBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    captureBtn.frame = CGRectMake(6 + (w - 18) / 3 + 3, 174, (w - 18) / 3, 26);
+    [captureBtn setTitle:@"⏺ 抓取" forState:UIControlStateNormal];
+    [captureBtn setTitleColor:[UIColor systemGreenColor] forState:UIControlStateNormal];
+    captureBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+    captureBtn.layer.cornerRadius = 6;
+    captureBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    [captureBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:captureBtn];
+
+    UIButton *stopBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    stopBtn.frame = CGRectMake(6 + (w - 18) / 3 * 2 + 6, 174, (w - 18) / 3, 26);
+    [stopBtn setTitle:@"⏹ 停止" forState:UIControlStateNormal];
+    [stopBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    stopBtn.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+    stopBtn.layer.cornerRadius = 6;
+    stopBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    [stopBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskStopCaptureTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:stopBtn];
+
+    // ══ 任务列表区：获取后展示任务 ══
+    sectionLabel(206, @"📄 任务列表");
+    CGFloat listH = MAX(70, MIN(140, h - 206 - 100));
+    UIScrollView *taskScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(6, 224, w - 12, listH)];
     taskScroll.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.08];
     taskScroll.layer.cornerRadius = 6;
     taskScroll.userInteractionEnabled = YES;
@@ -2471,16 +2485,16 @@ static void showTaskPanel(void) {
     _taskScroll = taskScroll;
     [panel addSubview:taskScroll];
 
-    // 日志区：记录抓取和用户点选的单项测试结果。
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 106, w - 12, h - 78)];
-    tv.frame = CGRectMake(6, 112 + listH, w - 12, h - 118 - listH);
+    // ══ 日志区 ══
+    sectionLabel(232 + listH, @"📜 运行日志");
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(6, 250 + listH, w - 12, h - 256 - listH)];
     tv.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1];
     tv.layer.cornerRadius = 6;
     tv.textColor = [UIColor whiteColor];
     tv.font = [UIFont systemFontOfSize:10];
     tv.editable = NO;
     tv.selectable = YES;
-    tv.text = @"iOS 等级页抓取日志：\n点「打开等级页」进入等级页，点「抓取」开始记录所有请求（不点停止不停止）。\n0x9172 任务数据到达后自动写入 qqtask_status.json，点「获取任务列表」即可看到全量任务。\n\n";
+    tv.text = @"QQ等级助手日志：\n🚀 一键任务＝自动跑 日签卡打卡/加好友/金币兑换，执行前后自动对比完成状态。\n📋 任务状态＝查看/刷新任务列表和完成情况。\n🔧 抓包调试＝排查接口用，日常不用点。\n\n";
     _logTextView = tv;
     _logView = panel;
     [panel addSubview:tv];
@@ -2767,7 +2781,7 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskAutoRunTapped:(UIButton *)sender {
-    // v1.6.2: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
+    // v1.6.3: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
     appendLogView(@"🚀 一键自动任务启动…（详见日志：日签卡/加好友/金币兑换 + 0x9172 回查）");
     runAutoHttpTasks();
 }

@@ -1,7 +1,7 @@
 Package: com.example.qqfloatball
 Name: QQFloatBall
-Version: 1.6.5
-Description: QQFloatBall 1.6.5 一键自动任务(日签卡/加好友/金币兑换 HTTP直调)+0x9172状态回查
+Version: 1.6.6
+Description: QQFloatBall 1.6.6 一键自动任务(日签卡/加好友/金币兑换 HTTP直调)+0x9172状态回查
 Depends: mobilesubstrate
 Maintainer: 傘
 Section: Tweaks

@@ -3,6 +3,31 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
+#import <substrate.h>
+
+// ─────────────────────────────────────────────
+// QQFloatBall 浮球
+// v1.7.0 (2026-09-02):
+//   · 修复 getCurrentUin 账号误判：捕获客户端请求 Cookie 里的真实 uin（_capturedCurrentUin），
+//     优先返回真实登录账号。此前靠「哪个号有 ti 域 p_skey」猜账号，820284286 旧缓存
+//     残留导致自动任务全发给旧账号（robots_addfriend csrf 100021 根因之一）
+//   · 0x9172 解析 JSON 增加 uin 字段，任务状态可核对所属账号
+// v1.6.9 (2026-09-02):
+//   · 原生 UI 自动点击：发布说说/盲盒签等原生页面（无 WKWebView）——
+//     遍历原生视图树找 UITextView 填文字 + 找「签到/打卡/发表/发布/分享」
+//     按钮 sendActionsForControlEvents 直接点（用户要求「进去要操作的」任务）
+//   · 修 QQWebView 老容器 valueForUndefinedKey: URL 噪音（安全读取）
+// v1.6.8 (2026-09-01):
+//   · autotap 收集放宽：不再是「必须是 WKWebView 类」，凡 respondsToSelector
+//     evaluateJavaScript:completionHandler: 的视图都注入（覆盖 QQ 内部 H5 容器）
+//   · 注入窗口 3轮×6s → 5轮×5s，覆盖盲盒签等慢加载页面
+//   · 二次注入：首轮点击（签到）后 2.5s 再注入，命中「发布到空间/分享」
+// v1.6.7:
+//   · 等级域按域分开捕获（ti/club p_skey 不同值，SignIn 用 club key 必 -3000）
+//   · levelCookie 按目标域选 key；runAutoTasks 完整自动导航
+// v1.6.6:
+//   · qun 域 bkn=hash33(skey)，按域捕获
+// ─────────────────────────────────────────────
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -45,9 +70,14 @@ static NSArray *_capturedTaskList = nil;
 static BOOL _capturedListDirty = NO;
 // ── 客户端原生请求捕获的 qun 域真实 p_skey（v1.2.2 修复加好友 csrf error）──
 static NSString *_capturedQunPskey = nil;
-static NSString *_capturedLevelPskey = nil; // v1.6.6: 等级域(ti/club/vip/y)真实 p_skey（g_tk/bkn 用 hash33(p_skey) 算）
+// v1.6.7: 等级域按域分开捕获！实测 ti.qq.com 与 club.vip.qq.com 的 p_skey 是不同值，
+//         SignIn(ti.qq.com) 用 club 域 key 必 -3000。按 URL 域精确归类
+static NSString *_capturedTiPskey = nil;    // ti.qq.com 域（日签卡 SignIn 用）
+static NSString *_capturedClubPskey = nil;  // club.vip.qq.com 域（等级页 Kuikly 接口用）
 // ── 客户端原生请求捕获的全局 skey（v1.6.6：qun 域 bkn=hash33(skey)，getLocalKeyOfDomain 拿不到 skey）──
 static NSString *_capturedSkey = nil;
+// ── v1.7.0: 客户端真实请求 Cookie 里捕获的当前登录 uin（getCurrentUin 优先用真实值，不再靠 p_skey 猜账号）──
+static NSString *_capturedCurrentUin = nil;
 
 // ── 抓包开关：YES=记录网络请求；NO=停止 ──
 // v1.1.0 起不再有抓包入口（防封防检测），代码保留但默认关
@@ -312,15 +342,25 @@ static void qqfbScheduleAutoStop(void) {
                 NSArray *parts = [ck componentsSeparatedByString:@";"];
                 for (NSString *part in parts) {
                     NSString *trim = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    // v1.7.0: 捕获 Cookie 里的真实 uin（等级页/群请求都带，直接拿当前登录账号）
+                    if ([trim hasPrefix:@"uin="]) {
+                        NSString *val = [trim substringFromIndex:4];
+                        if (val.length > 0 && val.length < 20 && [val rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound) {
+                            _capturedCurrentUin = val;
+                        }
+                    }
                     if ([trim hasPrefix:@"p_skey="]) {
                         NSString *val = [trim substringFromIndex:7];
                         if (val.length >= 20) {
                             if (isQun) {
                                 _capturedQunPskey = val;
                                 qqlog(@"[捕获] qun 域真实 p_skey 已缓存 (len=%lu)", (unsigned long)val.length);
-                            } else if (!_capturedLevelPskey) {
-                                _capturedLevelPskey = val;
-                                qqlog(@"[捕获] 等级域真实 p_skey 已缓存 (len=%lu)", (unsigned long)val.length);
+                            } else if ([url containsString:@"ti.qq.com"]) {
+                                _capturedTiPskey = val;
+                                qqlog(@"[捕获] ti.qq.com 域真实 p_skey 已缓存 (len=%lu)", (unsigned long)val.length);
+                            } else if (!_capturedClubPskey) {
+                                _capturedClubPskey = val;
+                                qqlog(@"[捕获] club 域真实 p_skey 已缓存 (len=%lu)", (unsigned long)val.length);
                             }
                         }
                     } else if ([trim hasPrefix:@"skey="]) {
@@ -623,6 +663,7 @@ static int qqfbParse9172AndSave(NSData *pbBody) {
         NSDictionary *root = @{
             @"capturedAt": @([[NSDate date] timeIntervalSince1970]),
             @"cmd": @"OidbSvcTrpcTcp.0x9172_0",
+            @"uin": (_capturedCurrentUin ?: @""),   // v1.7.0: 记录任务所属账号
             @"pbBodyLen": @(pbBody.length),
             @"taskCount": @(tasks.count),
             @"tasks": tasks
@@ -1084,6 +1125,10 @@ static NSString *getQunPskey(NSString *uin) {
 
 // ── 取当前登录 uin（从 p_skey 管理器遍历已知账号）──
 static NSString *getCurrentUin(void) {
+    // v1.7.0: 优先用客户端真实请求 Cookie 里捕获的 uin（等级页/群请求都带 uin=，最可靠）
+    if (_capturedCurrentUin && _capturedCurrentUin.length > 0) {
+        return _capturedCurrentUin;
+    }
     @try {
         NSArray *candidates = @[@"583663742", @"820284286", @"1172628163"];
         for (NSString *u in candidates) {
@@ -1462,6 +1507,7 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 // ── 提前声明：runAutoTasks 里调用（定义在其后）──
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
+static void autoTapNativeUI(void);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 
@@ -1499,12 +1545,20 @@ static NSArray *builtInTasks(void) {
 //  全部直接 POST，零页面点击，防封防检测
 // ══════════════════════════════════════════
 
-// ── 组装等级任务通用 Cookie（p_skey 体系 + skey 尝试）──
+// ── 组装等级任务通用 Cookie（p_skey 体系）──
+//  v1.6.7: 按目标域选 key！ti.qq.com 用 ti 域 key，club 用 club 域 key（实测两者不同值，
+//          SignIn 用错域 key 返回 -3000 ptlogin auth failed）
 static NSString *levelCookie(NSString *uin, NSString *extraPskeyDomain) {
-    // v1.6.6: 优先用客户端真实捕获的等级域 p_skey（实测 ti/club 域 p_skey=ZUTU...，g_tk=hash33(p_skey) 匹配）
-    NSString *pskey = _capturedLevelPskey;
-    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
-    if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 0);
+    NSString *pskey = nil;
+    if ([extraPskeyDomain containsString:@"ti.qq.com"]) {
+        pskey = _capturedTiPskey;
+        if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 1);
+        if (!pskey) pskey = getPskey(@"ti.qq.com", uin, 0);
+    } else if ([extraPskeyDomain containsString:@"club.vip.qq.com"]) {
+        pskey = _capturedClubPskey;
+        if (!pskey) pskey = getPskey(@"club.vip.qq.com", uin, 1);
+    }
+    if (!pskey) pskey = _capturedTiPskey ?: getPskey(@"ti.qq.com", uin, 1);
     NSString *skey = getSkey(uin);
     NSMutableString *ck = [NSMutableString string];
     if (skey && skey.length > 0) [ck appendFormat:@"skey=%@; ", skey];
@@ -1735,7 +1789,9 @@ static void execTaskByTitle(NSString *title, NSString *uin) {
 // ── 一键任务主流程：自动导航执行（v1.0.7 升级）──
 //   点一键 → 逐个打开未完成任务页 → 日志实时显示正在做哪个 → 自动检测状态变化
 //   能做自动完成的自动确认；需要手动操作的跳转页面引导用户点一下，然后自动验证
-__attribute__((unused)) static void runAutoTasks(void) {
+//   v1.6.7: 纯后台接口任务（日签卡 HTTP 直调）优先执行，加好友 iOS 无短 skey 跳过，
+//           其余任务自动导航（跳页面 + 注入 JS 自动点按钮 + 回查状态）
+static void runAutoTasks(void) {
     if (_taskRunning) {
         qqlog(@"[auto] 任务执行已在运行中");
         return;
@@ -1815,21 +1871,39 @@ __attribute__((unused)) static void runAutoTasks(void) {
                 return;
             }
 
-            // ══ ④ 逐个自动执行：跳转页面 → 注入 JS 自动点按钮 → 验证状态 ══
+            // ══ ④ 逐个自动执行：纯后台接口直调 → 跳转页面 → 注入 JS 自动点按钮 → 验证状态 ══
             int execDone = 0, execSkip = 0;
             for (int i = 0; i < (int)todoTasks.count; i++) {
                 NSDictionary *item = todoTasks[i];
                 NSString *title = item[@"title"];
                 NSString *jump = item[@"jump"];
                 qqlog(@"[auto] ── [%d/%lu] 正在做: %@ ──", i + 1, (unsigned long)todoTasks.count, title);
+
+                // v1.6.7: 纯后台 HTTP 任务优先直调（ti 域 key 已按域修复，SignIn 不再 -3000）
+                BOOL httpDone = NO;
+                if ([title containsString:@"日签卡"] || [title containsString:@"打卡"]) {
+                    httpDone = runDailySignTask(uin);
+                    if (httpDone) qqlog(@"[auto] ✅ 日签卡 HTTP 打卡成功（接口返回成功）");
+                    else qqlog(@"[auto] ⚠ 日签卡 HTTP 失败，继续跳页面兜底…");
+                } else if ([title containsString:@"金币"] || [title containsString:@"兑换"]) {
+                    runCoinExchangeTask(uin);  // code=0+req0=1000 = 已兑换/无金币（账号状态，非代码问题）
+                    continue;
+                } else if ([title containsString:@"加好友"] || [title containsString:@"加一位好友"]) {
+                    qqlog(@"[auto] ⚠ iOS 客户端无 10 字符短 skey（qsped 实测 robots_addfriend bkn=hash33(短skey)），此接口 iOS 走不通，跳过（可等级页手动加）");
+                    continue;
+                }
+                if (httpDone) { execDone++; continue; }
+
                 qqlog(@"[auto] 跳转任务页 + 注入自动点击…");
                 dispatch_async(dispatch_get_main_queue(), ^{
                     openJumpSchema(jump);
                 });
-                // 页面加载 + JS 自动点击：等待 6 秒后注入，共注入 3 轮
-                for (int round = 0; round < 3; round++) {
-                    [NSThread sleepForTimeInterval:6];
+                // 页面加载 + JS 自动点击：等待 5 秒后注入，共注入 5 轮（v1.6.8 加长窗口覆盖慢加载）
+                // v1.6.9: 每轮补一次原生 UI 点击（说说/盲盒签原生页面无 WKWebView）
+                for (int round = 0; round < 5; round++) {
+                    [NSThread sleepForTimeInterval:5];
                     autoTapAllWebViews();
+                    autoTapNativeUI();
                 }
                 [NSThread sleepForTimeInterval:4];
 
@@ -1899,9 +1973,11 @@ static void runLevelTasksAuto(void) {
                 openJumpSchema(jump);
             });
             // 页面加载后注入 JS 自动点击（3 轮，间隔 5 秒），再停留
+            // v1.6.9: 每轮补原生 UI 点击
             for (int round = 0; round < 3; round++) {
                 [NSThread sleepForTimeInterval:5];
                 autoTapAllWebViews();
+                autoTapNativeUI();
             }
             appendLogView([NSString stringWithFormat:@"✓ [%d/%lu] %@ 已停留完成", idx, (unsigned long)tasks.count, title]);
         }
@@ -2075,6 +2151,7 @@ static void runClosedLoopTasks(void) {
                 for (int round = 0; round < 3; round++) {
                     [NSThread sleepForTimeInterval:5];
                     autoTapAllWebViews();
+                    autoTapNativeUI();
                 }
 
                 // 4. 执行后：回等级页触发新 0x9172 → 对比 status
@@ -2815,9 +2892,9 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskAutoRunTapped:(UIButton *)sender {
-    // v1.6.6: 一键自动任务（HTTP 直调：日签卡打卡/加好友/金币兑换，执行前后 0x9172 状态对比）
-    appendLogView(@"🚀 一键自动任务启动…（详见日志：日签卡/加好友/金币兑换 + 0x9172 回查）");
-    runAutoHttpTasks();
+    // v1.6.7: 完整自动导航（HTTP 直调 + 跳页面自动点击 + 回查状态），覆盖全部可做任务
+    appendLogView(@"🚀 一键自动任务启动…（HTTP直调 + 自动导航遍历全部任务）");
+    runAutoTasks();
 }
 
 %new
@@ -3019,10 +3096,12 @@ __attribute__((unused)) static void showLogPanel(void) {
 //     全部用 NSClassFromString + performSelector 动态调用，加载零风险
 // ══════════════════════════════════════════
 
-// ── 递归收集 WKWebView（不引用 WKWebView 头文件，防编译/加载依赖）──
+// ── 递归收集可注入 JS 的视图（不引用 WKWebView 头文件，防编译/加载依赖）──
+// v1.6.8: 从「必须是 WKWebView 类」放宽为「respondsToSelector:evaluateJavaScript:completionHandler:」
+//         覆盖 QQ 内部 H5 容器（QQWebViewController 内 webView 类名可能不同）
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr) {
     if (!view) return;
-    if ([view isKindOfClass:NSClassFromString(@"WKWebView")]) {
+    if ([view respondsToSelector:NSSelectorFromString(@"evaluateJavaScript:completionHandler:")]) {
         [outArr addObject:view];
     }
     for (UIView *sub in view.subviews) {
@@ -3036,8 +3115,14 @@ static void autoTapWebView(id webView) {
         if (!webView) return;
         SEL evalSel = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
         if (![webView respondsToSelector:evalSel]) return;
-        NSURL *u = [webView valueForKey:@"URL"];
-        NSString *url = u.absoluteString ?: @"";
+        // v1.6.9: 安全读取 URL——QQWebView 老容器无 URL KVC，用 try-catch 保护
+        NSString *url = @"";
+        @try {
+            NSURL *u = [webView valueForKey:@"URL"];
+            url = u.absoluteString ?: @"";
+        } @catch (NSException *e) {
+            url = @"";
+        }
         qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
         NSString *js =
         @"(function(){"
@@ -3076,11 +3161,46 @@ static void autoTapWebView(id webView) {
             [inv setTarget:webView];
             [inv setSelector:evalSel];
             [inv setArgument:&js atIndex:2];
-            [inv setArgument:&handler atIndex:3];
+            void *handlerPtr = (__bridge void *)handler;
+            [inv setArgument:&handlerPtr atIndex:3];
             [inv invoke];
         } else {
             qqlog(@"[autotap] 无方法签名");
         }
+        // v1.6.8 二次注入：首轮点击（如「签到」）后等 2.5 秒再注入一轮，
+        // 命中新出现的按钮（如「发布到空间」「分享」）——盲盒签两步流程
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if (![webView respondsToSelector:evalSel]) return;
+                NSString *js2 =
+                @"(function(){"
+                "  var kws=['发布到空间','分享','去分享','发表','发布','确认','确定','完成','好的','继续','立即参与','参与'];"
+                "  var els=document.querySelectorAll('button,a,div,span,p,li,input[type=button],input[type=submit]');"
+                "  for(var i=0;i<els.length;i++){"
+                "    var el=els[i];"
+                "    if(el.offsetParent===null) continue;"
+                "    var t=(el.innerText||el.textContent||el.value||'').trim();"
+                "    if(!t||t.length>12) continue;"
+                "    for(var k=0;k<kws.length;k++){"
+                "      if(t.indexOf(kws[k])!==-1){ el.click(); return '二击:'+t; }"
+                "    }"
+                "  }"
+                "  return '';"
+                "})()";
+                NSMethodSignature *sig2 = [webView methodSignatureForSelector:evalSel];
+                if (sig2) {
+                    NSInvocation *inv2 = [NSInvocation invocationWithMethodSignature:sig2];
+                    [inv2 setTarget:webView];
+                    [inv2 setSelector:evalSel];
+                    [inv2 setArgument:&js2 atIndex:2];
+                    void *handler2Ptr = (__bridge void *)handler;
+                    [inv2 setArgument:&handler2Ptr atIndex:3];
+                    [inv2 invoke];
+                }
+            } @catch (NSException *e2) {
+                qqlog(@"[autotap] 二次注入异常: %@", e2);
+            }
+        });
     } @catch (NSException *e) {
         qqlog(@"[autotap] 注入异常: %@", e);
     }
@@ -3104,6 +3224,85 @@ static void autoTapAllWebViews(void) {
         });
     } @catch (NSException *e) {
         qqlog(@"[autotap] 遍历异常: %@", e);
+    }
+}
+
+// ══════════════════════════════════════════
+//  v1.6.9 原生 UI 自动点击（QQ 空间说说/盲盒签等原生页面没有 WKWebView）
+//  JS 注入对原生页面无效，改为遍历原生视图树：
+//   1) 找 UITextView 输入文字（发布说说：先填内容再点发表）
+//   2) 找标题含 签到/打卡/发表/发布/分享/确认/完成 的 UIButton 直接点
+//  纯动态调用 + 主线程，无 swizzle，加载零风险
+// ══════════════════════════════════════════
+
+// ── 递归收集可点击的原生按钮 + 可输入文本框 ──
+static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NSMutableArray *textViews) {
+    if (!view) return;
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *t = btn.currentTitle ?: @"";
+        if (t.length > 0 && t.length <= 12) {
+            [buttons addObject:@{@"btn": btn, @"title": t}];
+        }
+    } else if ([view isKindOfClass:[UITextView class]]) {
+        [textViews addObject:view];
+    }
+    for (UIView *sub in view.subviews) {
+        collectNativeActionsInView(sub, buttons, textViews);
+    }
+}
+
+// ── 原生页面自动操作：输入 + 点按钮 ──
+static void autoTapNativeUI(void) {
+    @try {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSMutableArray *buttons = [NSMutableArray array];
+            NSMutableArray *textViews = [NSMutableArray array];
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                collectNativeActionsInView(win, buttons, textViews);
+            }
+            // 1) 文本框：先输入「等级任务」文字（发布说说必须填内容才能点发表）
+            for (id tv in textViews) {
+                @try {
+                    if ([tv isFirstResponder] == NO) {
+                        [tv becomeFirstResponder];
+                    }
+                    // 用 UITextViewDelegate 的方式设置文字（直接 setText 不触发代理）
+                    if ([tv respondsToSelector:@selector(setText:)]) {
+                        NSString *cur = [tv valueForKey:@"text"] ?: @"";
+                        if (cur.length == 0) {
+                            [tv setValue:@"等级任务" forKey:@"text"];
+                            qqlog(@"[autotap] 原生输入框已填文字");
+                        }
+                    }
+                } @catch (NSException *e) {
+                    qqlog(@"[autotap] 原生输入异常: %@", e);
+                }
+            }
+            // 2) 按钮：按关键词匹配点击
+            NSArray *kws = @[@"签到", @"打卡", @"发表", @"发布", @"分享", @"确认", @"确定", @"完成", @"立即", @"去完成", @"领取"];
+            BOOL clicked = NO;
+            for (NSDictionary *item in buttons) {
+                NSString *t = item[@"title"];
+                for (NSString *kw in kws) {
+                    if ([t containsString:kw]) {
+                        UIButton *btn = item[@"btn"];
+                        if (btn.enabled && btn.hidden == NO && btn.alpha > 0.1) {
+                            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+                            qqlog(@"[autotap] 原生点击: %@", t);
+                            clicked = YES;
+                            break;
+                        }
+                    }
+                }
+                if (clicked) break;
+            }
+            if (!clicked && buttons.count == 0) {
+                qqlog(@"[autotap] 原生无可点按钮");
+            }
+        });
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] 原生遍历异常: %@", e);
     }
 }
 

@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.6"
+#define kQQFloatBallVersion @"1.7.7"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1584,6 +1584,40 @@ static void openLevelPage(void) {
     if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
 }
 
+// ── v1.7.7 关闭最顶层容器（小游戏全屏容器/模态页）──
+// 实测：qqminigame:// 小游戏打开后是全屏容器，openLevelPage 的 openURL
+// 无法覆盖它 → 后续任务 autotap 一直注入小游戏页面、0x9172 永不更新。
+// 必须先导航返回/dismiss 关闭容器，再回等级页。
+static void closeTopContainer(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIViewController *top = [UIApplication sharedApplication].keyWindow.rootViewController;
+            if (!top) return;
+            while (top.presentedViewController) top = top.presentedViewController;
+            // 优先导航返回（小游戏/Kuikly 容器一般是 push 的）
+            if ([top isKindOfClass:[UINavigationController class]]) {
+                UINavigationController *nav = (UINavigationController *)top;
+                if (nav.viewControllers.count > 1) {
+                    [nav popViewControllerAnimated:YES];
+                    qqlog(@"[auto] 已关闭容器（导航返回 %lu→%lu）",
+                          (unsigned long)nav.viewControllers.count,
+                          (unsigned long)(nav.viewControllers.count - 1));
+                    return;
+                }
+            }
+            // 其次 dismiss（模态页）
+            if (top.presentingViewController) {
+                [top dismissViewControllerAnimated:YES completion:nil];
+                qqlog(@"[auto] 已关闭容器（dismiss 模态页）");
+                return;
+            }
+            qqlog(@"[auto] 无容器可关闭（已在根页面）");
+        } @catch (NSException *e) {
+            qqlog(@"[auto] 关闭容器异常: %@", e);
+        }
+    });
+}
+
 // ── 在任务列表里按标题找任务状态（-1=不存在）──
 static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
     for (NSDictionary *task in taskList) {
@@ -2009,47 +2043,101 @@ static void runAutoTasks(void) {
                 }
                 if (httpDone) { execDone++; continue; }
 
-                // v1.7.5: 跳转前先回等级页（干净环境），避免 QQ 复用上次手动测试留下的旧页面
-                //（实测盲盒签跳到 daily-check-in/result 结果页=旧页面残留→无按钮可点→模拟点击无效）
-                qqlog(@"[auto] 先回等级页，准备跳转任务页…");
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    openLevelPage();
-                });
-                [NSThread sleepForTimeInterval:3];
-
-                qqlog(@"[auto] 跳转任务页 + 注入自动点击…");
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    openJumpSchema(jump);
-                });
-                // 页面加载 + JS 自动点击：等待 5 秒后注入，共注入 5 轮（v1.6.8 加长窗口覆盖慢加载）
-                // v1.6.9: 每轮补一次原生 UI 点击（说说/盲盒签原生页面无 WKWebView）
-                for (int round = 0; round < 5; round++) {
-                    [NSThread sleepForTimeInterval:5];
-                    autoTapAllWebViews();
-                    autoTapNativeUI();
+                // v1.7.7: 任务类型分流——
+                //  「跳转+停留」型（农场/福利社/视频/小游戏/漫剧/元宝/小说/听歌）：
+                //    打开页面停留服务端要求的秒数即完成，无需 JS 注入（JS 对 canvas/原生页无效，
+                //    实测全部返回空且浪费 5 轮×5 秒）；停留完关闭容器再验证。
+                //  「需点击」型（说说/盲盒签）：打开页面注入 JS + 原生点击。
+                NSArray *stayTitles = @[@"农场", @"福利社", @"视频任务", @"小游戏", @"漫剧", @"元宝", @"小说", @"看书", @"听歌"];
+                BOOL isStayTask = NO;
+                for (NSString *kw in stayTitles) {
+                    if ([title containsString:kw]) { isStayTask = YES; break; }
                 }
-                [NSThread sleepForTimeInterval:4];
 
-                // 重新验证该任务是否完成：回等级页触发新 0x9172 → 按 title 找 status
-                // v1.7.5: 旧代码用 fetchTaskList 在线拉取验证（iOS 只回 10 个基础任务，
-                //         额外活跃任务找不到 → 全部误报未完成），改用 0x9172 全量验证
-                double t0 = qqfbStatusCapturedAt();
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    openLevelPage();
-                });
-                BOOL got = qqfbWaitStatusRefresh(t0, 20);
-                int st = -1;
-                if (got) {
-                    NSArray *freshList = qqfbReadExtraOnlyTasks();
-                    st = qqfbFindTaskStatusIn(freshList ?: @[], @"", title);
-                }
-                if (st >= 1) {
-                    execDone++;
-                    qqlog(@"[auto] ✅ 完成: %@ (status=%d)", title, st);
-                } else {
-                    execSkip++;
-                    qqlog(@"[auto] ⏭ 未完成: %@ (status=%d%@，可能需更多操作，稍后可在等级页手动处理)",
-                          title, st, got ? @"" : @"，重抓超时");
+                // v1.7.7: 重试循环——每个任务最多尝试 3 次：
+                //  做任务 → 关闭容器 → 回等级页触发新 0x9172 验证 → 未完成重做（用户要求）
+                int maxAttempts = 3;
+                BOOL taskDone = NO;
+                for (int attempt = 1; attempt <= maxAttempts && !taskDone; attempt++) {
+                    if (attempt > 1) {
+                        qqlog(@"[auto] ↻ 重试第 %d 次（上次未完成）…", attempt);
+                    }
+                    // v1.7.5: 跳转前先回等级页（干净环境），避免 QQ 复用上次手动测试留下的旧页面
+                    //（实测盲盒签跳到 daily-check-in/result 结果页=旧页面残留→无按钮可点→模拟点击无效）
+                    qqlog(@"[auto] 先回等级页，准备跳转任务页…");
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        openLevelPage();
+                    });
+                    [NSThread sleepForTimeInterval:3];
+
+                    if (isStayTask) {
+                        // 停留时长按任务类型取（实测/服务端要求）
+                        int staySec = 5;
+                        if ([title containsString:@"小游戏"]) staySec = 16;
+                        else if ([title containsString:@"漫剧"]) staySec = 11;
+                        else if ([title containsString:@"视频"]) staySec = 32;
+                        else if ([title containsString:@"农场"]) staySec = 3;
+                        else if ([title containsString:@"福利社"]) staySec = 8;
+                        else if ([title containsString:@"元宝"]) staySec = 5;
+                        else if ([title containsString:@"小说"] || [title containsString:@"看书"]) staySec = 8;
+                        else if ([title containsString:@"听歌"]) staySec = 3;
+                        qqlog(@"[auto] 跳转任务页，停留 %d 秒（跳转+停留型）…", staySec);
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            openJumpSchema(jump);
+                        });
+                        // 分多次等待（期间每轮尝试注入一次，若出现可点按钮立即点）
+                        for (int round = 0; round < staySec / 5 + 1; round++) {
+                            [NSThread sleepForTimeInterval:5];
+                            autoTapAllWebViews();
+                        }
+                        // 停留型任务：服务端按停留时长记账，不强制注入
+                        qqlog(@"[auto] 停留结束，关闭容器回等级页验证…");
+                        closeTopContainer();
+                        [NSThread sleepForTimeInterval:2];
+                    } else {
+                        qqlog(@"[auto] 跳转任务页 + 注入自动点击…");
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            openJumpSchema(jump);
+                        });
+                        // 页面加载 + JS 自动点击：等待 5 秒后注入，共注入 5 轮（v1.6.8 加长窗口覆盖慢加载）
+                        // v1.6.9: 每轮补一次原生 UI 点击（说说/盲盒签原生页面无 WKWebView）
+                        for (int round = 0; round < 5; round++) {
+                            [NSThread sleepForTimeInterval:5];
+                            autoTapAllWebViews();
+                            autoTapNativeUI();
+                        }
+                        [NSThread sleepForTimeInterval:4];
+
+                        // v1.7.7: 需点击型任务完成后也先关容器（说说/盲盒签是 push 的原生/Kuikly 页，
+                        // 不关会叠加，openLevelPage 无法覆盖最顶层）
+                        closeTopContainer();
+                        [NSThread sleepForTimeInterval:2];
+                    }
+
+                    // 重新验证该任务是否完成：回等级页触发新 0x9172 → 按 title 找 status
+                    // v1.7.5: 旧代码用 fetchTaskList 在线拉取验证（iOS 只回 10 个基础任务，
+                    //         额外活跃任务找不到 → 全部误报未完成），改用 0x9172 全量验证
+                    double t0 = qqfbStatusCapturedAt();
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        openLevelPage();
+                    });
+                    BOOL got = qqfbWaitStatusRefresh(t0, 20);
+                    int st = -1;
+                    if (got) {
+                        NSArray *freshList = qqfbReadExtraOnlyTasks();
+                        st = qqfbFindTaskStatusIn(freshList ?: @[], @"", title);
+                    }
+                    if (st >= 1) {
+                        execDone++;
+                        taskDone = YES;
+                        qqlog(@"[auto] ✅ 完成: %@ (status=%d)", title, st);
+                    } else if (attempt >= maxAttempts) {
+                        execSkip++;
+                        qqlog(@"[auto] ⏭ 未完成: %@ (status=%d%@，重试 %d 次仍失败，稍后可在等级页手动处理)",
+                              title, st, got ? @"" : @"，重抓超时", maxAttempts);
+                    } else {
+                        qqlog(@"[auto] ⏳ 未完成: %@ (status=%d)，将重试…", title, st);
+                    }
                 }
                 // 上面验证已回等级页触发新 0x9172（也兼作「每个任务做完回等级页」，
                 // 避免旧任务页面残留导致 autotap 注入错误页面）

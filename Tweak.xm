@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.4"
+#define kQQFloatBallVersion @"1.7.5"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1679,8 +1679,15 @@ static BOOL runDailySignTask(NSString *uin) {
         int rc = 0;
         NSScanner *sc = [NSScanner scannerWithString:tail];
         if ([sc scanInt:&rc]) {
-            if (rc == 0) { qqlog(@"[任务] 日签卡 打卡成功 retCode=0"); return YES; }
-            qqlog(@"[任务] 日签卡 服务端拒绝 retCode=%d（可能今日已打卡/条件不满足）", rc);
+            // v1.7.4: retCode==-1 = 今日已打卡（已完成），同样视为成功！
+            // 实测小号响应 {"ret":0,"msg":"success!","data":{"retCode":-1,...}}
+            // 旧代码把 -1 当失败 → 跳页面兜底 → autotap 死循环点「今日已打卡」
+            if (rc == 0 || rc == -1) {
+                if (rc == -1) qqlog(@"[任务] 日签卡 retCode=-1 = 今日已打卡（任务已完成），视为成功");
+                else qqlog(@"[任务] 日签卡 打卡成功 retCode=0");
+                return YES;
+            }
+            qqlog(@"[任务] 日签卡 服务端拒绝 retCode=%d（可能条件不满足）", rc);
             return NO;
         }
     }
@@ -2010,6 +2017,12 @@ static void runAutoTasks(void) {
                     execSkip++;
                     qqlog(@"[auto] ⏭ 未完成: %@ (status=%d，可能需更多操作，稍后可在等级页手动处理)", title, st);
                 }
+                // v1.7.4: 每个任务做完回等级页，避免旧任务页面残留导致 autotap 注入错误页面
+                //（实测：盲盒签任务跳转后 autotap 还在注入上一个签到页，页面堆积死循环）
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    openLevelPage();
+                });
+                [NSThread sleepForTimeInterval:2];
             }
 
             // ══ ⑤ 汇总 + 回到等级页 ══
@@ -3216,7 +3229,9 @@ static void autoTapWebView(id webView) {
         qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
         NSString *js =
         @"(function(){"
-        "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','已打卡','领福利'];"
+        "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','领福利'];"
+        "  var skipWords=['已打卡','今日已打卡','已完成','已领取','已发布','已参与','已签到','已达成','已获得','已领取奖励','已奖励','已领','已完'];"
+        "  function isSkip(t){ for(var i=0;i<skipWords.length;i++){ if(t.indexOf(skipWords[i])!==-1) return true; } return false; }"
         "  function tryClick(root){"
         "    var els=root.querySelectorAll('button,a,div,span,p,li,input[type=button],input[type=submit]');"
         "    for(var i=0;i<els.length;i++){"
@@ -3224,6 +3239,7 @@ static void autoTapWebView(id webView) {
         "      if(el.offsetParent===null) continue;"
         "      var t=(el.innerText||el.textContent||el.value||'').trim();"
         "      if(!t||t.length>12) continue;"
+        "      if(isSkip(t)) continue;"
         "      for(var k=0;k<kws.length;k++){"
         "        if(t.indexOf(kws[k])!==-1){"
         "          el.click();"

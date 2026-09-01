@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.0"
+#define kQQFloatBallVersion @"1.8.1"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3291,12 +3291,24 @@ __attribute__((unused)) static void showLogPanel(void) {
         return;
     }
     appendLogView([NSString stringWithFormat:@"🧪 测试单个任务：%@（仅执行此行）", title]);
-    // 有跳转地址的任务只在用户点击后打开对应页面；不自动扫描、不自动点击其它页面。
+    // v1.8.1: 用户点选任务后：打开页面 + 自动扫描点击 5 轮（不再「后续操作由用户完成」——
+    // 用户实测「进去小说又不点 就是乱逛」= 手动点任务后插件完全不动）
     if (jump.length > 0) {
         dispatch_async(dispatch_get_main_queue(), ^{
             qqlog(@"[任务测试] 用户点选，打开页面：%@ jump=%@", title, jump);
             openJumpSchema(jump);
-            appendLogView([NSString stringWithFormat:@"➡️ 已打开：%@；后续操作由用户完成", title]);
+            appendLogView([NSString stringWithFormat:@"➡️ 已打开：%@，自动扫描点击中…", title]);
+        });
+        // 后台线程：等待页面加载后自动扫描点击 5 轮（与一键任务同逻辑）
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            @autoreleasepool {
+                for (int round = 0; round < 5; round++) {
+                    [NSThread sleepForTimeInterval:5];
+                    autoTapAllWebViews();
+                    autoTapNativeUI();
+                }
+                qqlog(@"[任务测试] 自动扫描结束（5 轮），可手动补充操作");
+            }
         });
         return;
     }
@@ -3532,7 +3544,29 @@ static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NS
         if (t.length > 0 && t.length <= 12) {
             [buttons addObject:@{@"btn": view, @"title": t}];
         }
-    } else if ([view isKindOfClass:[UITextView class]]) {
+    }
+    // v1.8.1: Kuikly 页面的可点击组件是「带 UITapGestureRecognizer 的 UIView」
+    //（Kuikly 原生渲染，不是 UIControl 也没有 DOM）——小说书城点书/福利社立即领取
+    // 都靠手势。收集可见且带 tap 手势的 view（避开已有标题的 UIControl 和纯容器）
+    if (![view isKindOfClass:[UIControl class]] && view.gestureRecognizers.count > 0 && !view.hidden && view.alpha > 0.1) {
+        BOOL hasTap = NO;
+        for (UIGestureRecognizer *g in view.gestureRecognizers) {
+            if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                hasTap = YES;
+                break;
+            }
+        }
+        if (hasTap) {
+            // 只收有实质内容的 view（文字/图片/子视图数适中），避免误收整个页面容器
+            NSString *acc = view.accessibilityLabel ?: @"";
+            BOOL hasContent = acc.length > 0 || view.subviews.count >= 1;
+            if (hasContent && view.frame.size.width > 40 && view.frame.size.height > 20) {
+                NSString *t = acc.length > 0 ? acc : @"(手势组件)";
+                [buttons addObject:@{@"btn": view, @"title": t, @"gesture": @YES}];
+            }
+        }
+    }
+    if ([view isKindOfClass:[UITextView class]]) {
         [textViews addObject:view];
     }
     for (UIView *sub in view.subviews) {
@@ -3597,14 +3631,40 @@ static void autoTapNativeUI(void) {
                     if ([t containsString:kw]) {
                         UIControl *btn = item[@"btn"];
                         if (btn.hidden == NO && btn.alpha > 0.1) {
-                            // v1.7.8: 若按钮 disabled 但标题是发表/发布/发送（需文字才点亮），
-                            // 文字已填+delegate 已触发，此时强制 sendActions 也能触发逻辑
-                            if (!btn.enabled) {
-                                qqlog(@"[autotap] 按钮 %@ 当前 disabled，强制触发（文字已填）", t);
+                            // v1.8.1: Kuikly 手势组件（小说书城点书/福利社立即领取）——
+                            // 不是 UIControl，直接调手势的 target/action 模拟点击
+                            if ([item[@"gesture"] boolValue]) {
+                                UIView *gv = (UIView *)btn;
+                                for (UIGestureRecognizer *g in gv.gestureRecognizers) {
+                                    if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                                        id target = [g valueForKey:@"_targets"]; // NSArray of UIGestureRecognizerTarget
+                                        @try {
+                                            id tgt = [(NSArray *)target firstObject];
+                                            id obj = [tgt valueForKey:@"_target"];
+                                            NSValue *actVal = [tgt valueForKey:@"_action"];
+                                            SEL action = actVal.pointerValue;
+                                            if (obj && action) {
+                                                [obj performSelector:action withObject:g];
+                                                qqlog(@"[autotap] 手势点击: %@", t);
+                                                clicked = YES;
+                                            }
+                                        } @catch (NSException *e) {
+                                            qqlog(@"[autotap] 手势触发异常: %@", e);
+                                        }
+                                        if (clicked) break;
+                                    }
+                                }
+                                if (clicked) break;
+                            } else {
+                                // v1.7.8: 若按钮 disabled 但标题是发表/发布/发送（需文字才点亮），
+                                // 文字已填+delegate 已触发，此时强制 sendActions 也能触发逻辑
+                                if (!btn.enabled) {
+                                    qqlog(@"[autotap] 按钮 %@ 当前 disabled，强制触发（文字已填）", t);
+                                }
+                                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+                                qqlog(@"[autotap] 原生点击: %@", t);
+                                clicked = YES;
                             }
-                            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
-                            qqlog(@"[autotap] 原生点击: %@", t);
-                            clicked = YES;
                             break;
                         }
                     }
@@ -3613,6 +3673,36 @@ static void autoTapNativeUI(void) {
             }
             if (!clicked && buttons.count == 0) {
                 qqlog(@"[autotap] 原生无可点按钮");
+            }
+            // v1.8.1: kws 都没命中时，兜底点击第一个可见手势组件——
+            // 小说书城的书卡片是 Kuikly 手势组件（无关键词标题），必须点进书才完成
+            //「看任一本书」。只点 gesture=YES 的组件，避免误点普通按钮。
+            if (!clicked) {
+                for (NSDictionary *item in buttons) {
+                    if (![item[@"gesture"] boolValue]) continue;
+                    UIControl *gv = item[@"btn"];
+                    if (gv.hidden || gv.alpha <= 0.1) continue;
+                    @try {
+                        for (UIGestureRecognizer *g in gv.gestureRecognizers) {
+                            if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                                id target = [g valueForKey:@"_targets"];
+                                id tgt = [(NSArray *)target firstObject];
+                                id obj = [tgt valueForKey:@"_target"];
+                                NSValue *actVal = [tgt valueForKey:@"_action"];
+                                SEL action = actVal.pointerValue;
+                                if (obj && action) {
+                                    [obj performSelector:action withObject:g];
+                                    qqlog(@"[autotap] 手势兜底点击: %@", item[@"title"]);
+                                    clicked = YES;
+                                }
+                            }
+                            if (clicked) break;
+                        }
+                    } @catch (NSException *e) {
+                        qqlog(@"[autotap] 手势兜底异常: %@", e);
+                    }
+                    if (clicked) break;
+                }
             }
         });
     } @catch (NSException *e) {

@@ -1603,6 +1603,12 @@ static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
+// v1.7.6: 0x9172 全量任务数据源（定义在 runAutoTasks 之后，须前向声明）
+static NSArray *qqfbReadExtraOnlyTasks(void);
+static BOOL qqfbIsPaidTaskTitle(NSString *title);
+static double qqfbStatusCapturedAt(void);
+static BOOL qqfbWaitStatusRefresh(double oldTs, int timeoutSec);
+static int qqfbFindTaskStatusIn(NSArray *tasks, NSString *taskId, NSString *title);
 
 // ══════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════

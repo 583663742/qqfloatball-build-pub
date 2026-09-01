@@ -2151,6 +2151,7 @@ static NSArray *qqfbReadTaskStatusList(void) {
 
 // v1.7.1: 只返回「额外活跃天数」组的任务（用户需求：付费加倍/日常活跃不要）
 // group=extra 优先；旧 JSON 无 group 字段时退化为过滤付费标题（兼容历史数据）
+static BOOL qqfbIsPaidTaskTitle(NSString *title);   // 前向声明（定义在下方 2216 行）
 static NSArray *qqfbReadExtraOnlyTasks(void) {
     NSArray *all = qqfbReadTaskStatusList();
     if (!all || all.count == 0) return nil;

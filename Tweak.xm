@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.7"
+#define kQQFloatBallVersion @"1.7.8"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1584,34 +1584,64 @@ static void openLevelPage(void) {
     if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
 }
 
-// ── v1.7.7 关闭最顶层容器（小游戏全屏容器/模态页）──
+// ── v1.7.8 关闭最顶层容器（小游戏全屏容器/模态页/Kuikly 页）──
 // 实测：qqminigame:// 小游戏打开后是全屏容器，openLevelPage 的 openURL
 // 无法覆盖它 → 后续任务 autotap 一直注入小游戏页面、0x9172 永不更新。
 // 必须先导航返回/dismiss 关闭容器，再回等级页。
+// v1.7.8 修复：QQ 页面结构是 TabBar→NavigationController→push 的任务页，
+//   旧代码只遍历 presentedViewController 链（QQ 无模态页→永远「已在根页面」→
+//   容器关不掉）。新逻辑完整遍历：TabBar.selected → Nav.viewControllers.last
+//   → presented 链，层层找最顶层可关闭的 VC。
+static UIViewController *topMostViewController(UIViewController *root) {
+    if (!root) return nil;
+    UIViewController *top = root;
+    int depth = 0;
+    while (depth < 20) {
+        UIViewController *next = nil;
+        if ([top isKindOfClass:[UITabBarController class]]) {
+            next = [(UITabBarController *)top selectedViewController];
+        } else if ([top isKindOfClass:[UINavigationController class]]) {
+            NSArray *vcs = [(UINavigationController *)top viewControllers];
+            if (vcs.count > 0) next = vcs.lastObject;
+        }
+        if (top.presentedViewController) next = top.presentedViewController;
+        if (!next || next == top) break;
+        top = next;
+        depth++;
+    }
+    return top;
+}
+
 static void closeTopContainer(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            UIViewController *top = [UIApplication sharedApplication].keyWindow.rootViewController;
+            UIViewController *top = topMostViewController([UIApplication sharedApplication].keyWindow.rootViewController);
             if (!top) return;
-            while (top.presentedViewController) top = top.presentedViewController;
-            // 优先导航返回（小游戏/Kuikly 容器一般是 push 的）
-            if ([top isKindOfClass:[UINavigationController class]]) {
-                UINavigationController *nav = (UINavigationController *)top;
-                if (nav.viewControllers.count > 1) {
-                    [nav popViewControllerAnimated:YES];
-                    qqlog(@"[auto] 已关闭容器（导航返回 %lu→%lu）",
-                          (unsigned long)nav.viewControllers.count,
-                          (unsigned long)(nav.viewControllers.count - 1));
-                    return;
-                }
+            // 场景1：在导航栈中间（有可返回的页面）→ pop 回上一页
+            UINavigationController *nav = top.navigationController;
+            if (nav && nav.viewControllers.count > 1) {
+                [nav popViewControllerAnimated:YES];
+                qqlog(@"[auto] 已关闭容器（导航返回 %lu→%lu）",
+                      (unsigned long)nav.viewControllers.count,
+                      (unsigned long)(nav.viewControllers.count - 1));
+                return;
             }
-            // 其次 dismiss（模态页）
+            // 场景2：模态页 → dismiss
             if (top.presentingViewController) {
                 [top dismissViewControllerAnimated:YES completion:nil];
                 qqlog(@"[auto] 已关闭容器（dismiss 模态页）");
                 return;
             }
-            qqlog(@"[auto] 无容器可关闭（已在根页面）");
+            // 场景3：顶层 VC 本身就是导航控制器且栈 >1 → pop
+            if ([top isKindOfClass:[UINavigationController class]]) {
+                UINavigationController *nav2 = (UINavigationController *)top;
+                if (nav2.viewControllers.count > 1) {
+                    [nav2 popViewControllerAnimated:YES];
+                    qqlog(@"[auto] 已关闭容器（顶层导航返回）");
+                    return;
+                }
+            }
+            qqlog(@"[auto] 无容器可关闭（已在根页面: %@）", NSStringFromClass([top class]));
         } @catch (NSException *e) {
             qqlog(@"[auto] 关闭容器异常: %@", e);
         }
@@ -2062,13 +2092,9 @@ static void runAutoTasks(void) {
                     if (attempt > 1) {
                         qqlog(@"[auto] ↻ 重试第 %d 次（上次未完成）…", attempt);
                     }
-                    // v1.7.5: 跳转前先回等级页（干净环境），避免 QQ 复用上次手动测试留下的旧页面
-                    //（实测盲盒签跳到 daily-check-in/result 结果页=旧页面残留→无按钮可点→模拟点击无效）
-                    qqlog(@"[auto] 先回等级页，准备跳转任务页…");
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        openLevelPage();
-                    });
-                    [NSThread sleepForTimeInterval:3];
+                    // v1.7.8: 删掉每轮「先回等级页」——上一个任务验证已回等级页，
+                    // 重复回等级页会 openURL 冲突 + 刷屏；直接从当前等级页跳转任务页
+                    // （v1.7.5 加它防旧页面残留，但验证本身已保证回到等级页）
 
                     if (isStayTask) {
                         // 停留时长按任务类型取（实测/服务端要求）
@@ -2085,10 +2111,17 @@ static void runAutoTasks(void) {
                         dispatch_async(dispatch_get_main_queue(), ^{
                             openJumpSchema(jump);
                         });
-                        // 分多次等待（期间每轮尝试注入一次，若出现可点按钮立即点）
+                        // v1.7.8: 停留型任务期间每轮做「原生 UI 点击」——Kuikly 任务页不是
+                        // WKWebView（JS 注入永远找不到，纯刷屏日志），但原生按钮（看广告/
+                        // 进入游戏/开始阅读等）可点；「未找到 WKWebView」只在第一轮打一次
+                        BOOL wvLogged = NO;
                         for (int round = 0; round < staySec / 5 + 1; round++) {
                             [NSThread sleepForTimeInterval:5];
-                            autoTapAllWebViews();
+                            autoTapNativeUI();
+                            if (!wvLogged) {
+                                autoTapAllWebViews();
+                                wvLogged = YES;
+                            }
                         }
                         // 停留型任务：服务端按停留时长记账，不强制注入
                         qqlog(@"[auto] 停留结束，关闭容器回等级页验证…");
@@ -3344,7 +3377,9 @@ static void autoTapWebView(id webView) {
         } @catch (NSException *e) {
             url = @"";
         }
-        qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
+        // v1.7.8: 「注入页面」日志降噪——只有 JS 实际点了按钮或报错才打
+        // （旧版每次注入都打，5 轮×N 页面刷屏，用户「看了都费劲」）
+        // qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
         // v1.7.5: URL 为空的容器（Kuikly 原生壳/未加载完）注入无效，跳过——等页面真正加载出来
         //（实测：盲盒签 result 页注入全返回空，其中一部分是空 URL 的 Kuikly 容器）
         if (url.length == 0) {
@@ -3445,7 +3480,14 @@ static void autoTapAllWebViews(void) {
                 collectWebViewsInView(win, found);
             }
             if (found.count == 0) {
-                qqlog(@"[autotap] 未找到 WKWebView（页面可能还在加载）");
+                // v1.7.8: 日志降噪——「未找到 WKWebView」连续打 N 次刷屏（Kuikly 任务页
+                // 本来就没有 WKWebView），改为最多 10 秒打一次
+                static NSTimeInterval lastLog = 0;
+                NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+                if (now - lastLog > 10) {
+                    qqlog(@"[autotap] 未找到 WKWebView（页面可能还在加载/Kuikly 原生页）");
+                    lastLog = now;
+                }
                 return;
             }
             for (id wv in found) {
@@ -3502,6 +3544,23 @@ static void autoTapNativeUI(void) {
                         NSString *cur = [tv valueForKey:@"text"] ?: @"";
                         if (cur.length == 0) {
                             [tv setValue:@"等级任务" forKey:@"text"];
+                            // v1.7.8 关键修复：QQ 发表按钮监听 textViewDidChange: 才点亮，
+                            // 直接 setText 不触发 delegate → 按钮永远 disabled 点不了（用户实测
+                            // 「粘贴进去文字了但发表按键不亮」）。填字后手动触发 delegate 回调 +
+                            // 发系统通知，让 QQ 内部逻辑点亮发表按钮。
+                            @try {
+                                id delegate = [tv valueForKey:@"delegate"];
+                                if (delegate && [delegate respondsToSelector:@selector(textViewDidChange:)]) {
+                                    [delegate textViewDidChange:tv];
+                                    qqlog(@"[autotap] 已触发 textViewDidChange 点亮发表按钮");
+                                }
+                            } @catch (NSException *e) {
+                                qqlog(@"[autotap] 触发 delegate 异常: %@", e);
+                            }
+                            @try {
+                                [[NSNotificationCenter defaultCenter]
+                                    postNotificationName:UITextViewTextDidChangeNotification object:tv];
+                            } @catch (NSException *e) {}
                             qqlog(@"[autotap] 原生输入框已填文字");
                         }
                     }
@@ -3510,14 +3569,19 @@ static void autoTapNativeUI(void) {
                 }
             }
             // 2) 按钮：按关键词匹配点击
-            NSArray *kws = @[@"签到", @"打卡", @"发表", @"发布", @"分享", @"确认", @"确定", @"完成", @"立即", @"去完成", @"领取"];
+            NSArray *kws = @[@"签到", @"打卡", @"发表", @"发送", @"发布", @"分享", @"确认", @"确定", @"完成", @"立即", @"去完成", @"领取"];
             BOOL clicked = NO;
             for (NSDictionary *item in buttons) {
                 NSString *t = item[@"title"];
                 for (NSString *kw in kws) {
                     if ([t containsString:kw]) {
                         UIButton *btn = item[@"btn"];
-                        if (btn.enabled && btn.hidden == NO && btn.alpha > 0.1) {
+                        if (btn.hidden == NO && btn.alpha > 0.1) {
+                            // v1.7.8: 若按钮 disabled 但标题是发表/发布/发送（需文字才点亮），
+                            // 文字已填+delegate 已触发，此时强制 sendActions 也能触发逻辑
+                            if (!btn.enabled) {
+                                qqlog(@"[autotap] 按钮 %@ 当前 disabled，强制触发（文字已填）", t);
+                            }
                             [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
                             qqlog(@"[autotap] 原生点击: %@", t);
                             clicked = YES;

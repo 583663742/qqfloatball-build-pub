@@ -34,6 +34,11 @@
 // v1.6.6:
 //   · qun 域 bkn=hash33(skey)，按域捕获
 // ─────────────────────────────────────────────
+// v1.7.3 (2026-09-02):
+//   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
+//   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
+//   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
+#define kQQFloatBallVersion @"1.7.3"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -2606,8 +2611,8 @@ static void showTaskPanel(void) {
     };
 
     // 标题栏
-    UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 140, 22)];
-    titleLb.text = @"⚡ QQ等级助手 v1.6.6";
+    UILabel *titleLb = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, 170, 22)];
+    titleLb.text = [NSString stringWithFormat:@"⚡ QQ等级助手 v%@", kQQFloatBallVersion];
     titleLb.textColor = [UIColor whiteColor];
     titleLb.font = [UIFont boldSystemFontOfSize:15];
     [panel addSubview:titleLb];

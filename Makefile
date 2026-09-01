@@ -13,7 +13,8 @@ TWEAK_NAME = QQFloatBall
 
 QQFloatBall_FILES = Tweak.xm
 QQFloatBall_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations -Wno-arc-retain-cycles -nostdinc++ -isystem "$(THEOS_SDK_PATH)/usr/include/c++/v1" -I"$(THEOS)/vendor/include"
-QQFloatBall_LDFLAGS = -framework CydiaSubstrate -fuse-ld=lld
+# v1.7.0: macOS CI 用默认 ld64，禁止 -fuse-ld=lld（macOS clang 报 invalid linker name）
+QQFloatBall_LDFLAGS = -framework CydiaSubstrate
 # ⚠️ 签名是标准流程：禁止 TARGET_CODESIGN=true（无签名→ellekit 拒载→球消失，2026-08-19 实锤）
 # ⚠️ 链接器必须真 Apple ld64（arm64-apple-darwin-ld / theos toolchain ld.exe, md5 016b3a02）：
 #    - 禁止 -fuse-ld=lld（mingw lld 不支持 darwin 目标）

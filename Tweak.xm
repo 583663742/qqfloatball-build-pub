@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.8"
+#define kQQFloatBallVersion @"1.8.9"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1681,6 +1681,7 @@ static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
 static void qqfbTapCloseButton(void);
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
+static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag);
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag);
 // v1.8.7: qqfbDumpViewTree 已移除（诊断完成，dump 遍历 Kuikly 深层视图有闪退嫌疑）
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
@@ -3601,7 +3602,57 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
     }
 }
 
-// ── 触发 Kuikly 组件点击（v1.8.8，腾讯开源 KuiklyUI 实锤 + 闪退实锤修正）──
+// ── v1.8.9: 模拟真实触摸点击（越狱插件标准做法）──
+// Kuikly 源码实锤(KRView.m): KRView 覆写 touchesBegan/touchesEnded,
+//   内部自动调 css_touchDown/css_touchUp([p_generateBaseParamsWithEvent:...])
+//   —— 这是 Kuikly 自己的触摸响应路径, 跟真人手指点击完全一致。
+// 因此只需构造 UITouch+UIEvent 发给目标 view, Kuikly 必然响应, 不需要
+// 猜手势/调 block/触发 target/action（v1.8.3~v1.8.8 全部绕路失败史）。
+// 构造方法: UITouch 用 KVC 设私有 ivar(_phase/_window/_view/_locationInWindow
+//   /_timestamp/_tapCount), UIEvent 用 UITouchesEvent 私有类 + _addTouch:。
+static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
+    @try {
+        if (!view || view.window == nil) return NO;
+        UIWindow *window = view.window;
+        CGPoint center = [view convertPoint:CGPointMake(CGRectGetMidX(view.bounds),
+                                                        CGRectGetMidY(view.bounds))
+                                    toView:window];
+        Class touchCls = NSClassFromString(@"UITouch");
+        if (!touchCls) return NO;
+        id touch = [[touchCls alloc] init];
+        // 私有 ivar 逐个 KVC 设置（有 @try 保护, 个别 iOS 版本 ivar 名差异不致命）
+        [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
+        [touch setValue:@(1) forKey:@"_tapCount"];
+        [touch setValue:window forKey:@"_window"];
+        [touch setValue:view forKey:@"_view"];
+        [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"_locationInWindow"];
+        [touch setValue:[NSNumber numberWithDouble:[[NSProcessInfo processInfo] systemUptime]]
+                 forKey:@"_timestamp"];
+        // UITouchesEvent 私有类 + _addTouch:forDelayedDelivery: 构造事件
+        Class evCls = NSClassFromString(@"UITouchesEvent");
+        id event = [[evCls alloc] init];
+        SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
+        if (event && addSel && [event respondsToSelector:addSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [event performSelector:addSel withObject:touch withObject:@NO];
+#pragma clang diagnostic pop
+        }
+        NSSet *touchSet = [NSSet setWithObject:touch];
+        // 完整触摸序列: began -> ended（Kuikly 需要 touchDown 先于 touchUp）
+        [view touchesBegan:touchSet withEvent:event];
+        [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
+        [view touchesEnded:touchSet withEvent:event];
+        qqlog(@"[autotap] %@: %@ 模拟触摸(%.0f,%.0f)", logTag,
+              NSStringFromClass([view class]), center.x, center.y);
+        return YES;
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] 模拟触摸异常(%@): %@", logTag, e);
+        return NO;
+    }
+}
+
+// ── 触发 Kuikly 组件点击（v1.8.8, 保留手势路径作 fallback; v1.8.9 主路径改模拟触摸）──
 // KuiklyUI core-render-ios/Extension/Category/UIView+CSS.m：
 //   setCss_click: 时创建 UITapGestureRecognizer(css_tapGR)，target=view,
 //   action=css_onClickTapWithSender: —— 手势触发后 Kuikly 自己调 css_click block。
@@ -3612,7 +3663,9 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag) {
     @try {
         if (!view) return NO;
-        // 优先找 view 自带的 UITapGestureRecognizer（css_tapGR）——官方点击手势
+        // v1.8.9 主路径: 模拟真实触摸（跟真人手指一致, Kuikly 触摸响应必然触发）
+        if (qqfbSimulateTapOnView(view, logTag)) return YES;
+        // fallback: 找 view 自带的 UITapGestureRecognizer（css_tapGR）——官方点击手势
         for (UIGestureRecognizer *g in view.gestureRecognizers) {
             if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
             NSString *cls = NSStringFromClass([g class]);

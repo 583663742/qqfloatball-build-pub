@@ -3753,6 +3753,8 @@ __attribute__((unused)) static void dumpPSKeys(void) {
 // ── 构造器：dylib 加载即重试创建悬浮球（不依赖 setDelegate hook）──
 __attribute__((constructor))
 static void qqfloatball_ctor(void) {
+    // v1.7.3: 加载即打印版本号，拉日志一眼确认设备装的哪个版本
+    qqlog(@"[QQFloatBall] 版本 v%@ 已加载 (build %s)", kQQFloatBallVersion, __DATE__);
     // 循环重试：QQ 冷启动时 scene 可能几秒内还没就绪
     dispatch_async(dispatch_get_main_queue(), ^{
         for (int i = 0; i < 15; i++) {

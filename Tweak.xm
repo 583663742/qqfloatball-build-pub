@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.2"
+#define kQQFloatBallVersion @"1.8.3"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -98,6 +98,9 @@ static BOOL _captureOnlyTasks = NO;
 // ── v1.2.9: 点击「额外活跃」后 5 秒内无条件记录所有请求 URL+body（锁定33任务真实接口）──
 // v1.2.11: 打开等级页后立即开启 8 秒 DUMP（等级页一打开就拉取全量任务，不需点额外活跃）
 static BOOL _dumpAllRequests = NO;
+// v1.8.3: 会员状态缓存（福利社 GetZone 响应解析；非会员领券任务做不了直接跳过）
+static BOOL _userIsSvip = NO;
+static BOOL _userSvipChecked = NO;
 // v1.4: 闭环执行进行中（暂停抓包自动停止，保证执行后重抓 0x9172 不被 8 秒定时器打断）
 static BOOL _closedLoopRunning = NO;
 
@@ -328,6 +331,17 @@ static void qqfbScheduleAutoStop(void) {
                     NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
                     if (responseText.length > 0) {
                         qqlog(@"[iOS等级页响应] %@\n%@", url, responseText.length > 6000 ? [responseText substringToIndex:6000] : responseText);
+                        // v1.8.3: 解析福利社 GetZone 响应的会员状态——非会员领券任务做不了
+                        if ([url containsString:@"GetZone"] && !_userSvipChecked) {
+                            id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                            NSDictionary *uinfo = [obj isKindOfClass:[NSDictionary class]] ? obj[@"userInfo"] : nil;
+                            if ([uinfo isKindOfClass:[NSDictionary class]]) {
+                                _userIsSvip = [uinfo[@"isSvip"] boolValue];
+                                _userSvipChecked = YES;
+                                qqlog(@"[svip] 会员状态: isSvip=%d vipLevel=%@ (福利社领券任务据此跳过/执行)",
+                                      _userIsSvip, uinfo[@"vipLevel"] ?: @"?");
+                            }
+                        }
                     } else {
                         qqlog(@"[iOS等级页响应] %@ (非UTF-8, %lu bytes)", url, (unsigned long)data.length);
                     }
@@ -1665,6 +1679,8 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
+static void qqfbTapCloseButton(void);
+static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 // v1.7.6: 0x9172 全量任务数据源（定义在 runAutoTasks 之后，须前向声明）
@@ -2097,6 +2113,14 @@ static void runAutoTasks(void) {
                     // （v1.7.5 加它防旧页面残留，但验证本身已保证回到等级页）
 
                     if (isStayTask) {
+                        // v1.8.3: 福利社领券——非会员做不了（日志实锤 isSvip=false，
+                        // 用户明确「不是会员就做不了那个领券的任务」），直接跳过不浪费时间乱点
+                        if ([title containsString:@"福利社"] && !_userIsSvip) {
+                            qqlog(@"[auto] ⏭ 福利社领券：非会员做不了（isSvip=0），跳过该任务");
+                            appendLogView(@"⏭ 福利社领券：非会员不可做，已跳过");
+                            taskDone = YES; // 标记完成跳过后续重试
+                            break;
+                        }
                         // 停留时长按任务类型取（实测/服务端要求）
                         int staySec = 5;
                         if ([title containsString:@"小游戏"]) staySec = 16;
@@ -2111,17 +2135,31 @@ static void runAutoTasks(void) {
                         dispatch_async(dispatch_get_main_queue(), ^{
                             openJumpSchema(jump);
                         });
+                        // v1.8.3 视频任务（用户实测「老乱点广告」）：进页面后**不点任何东西**，
+                        // 等右上角广告计时器结束，然后点右上角 X 关闭。日志实锤：旧逻辑每轮
+                        // autoTapNativeUI 点到了全屏 KRView(0 0; 430 932)=乱点广告。
+                        BOOL isVideoTask = [title containsString:@"视频"];
                         // v1.7.8: 停留型任务期间每轮做「原生 UI 点击」——Kuikly 任务页不是
                         // WKWebView（JS 注入永远找不到，纯刷屏日志），但原生按钮（看广告/
                         // 进入游戏/开始阅读等）可点；「未找到 WKWebView」只在第一轮打一次
                         BOOL wvLogged = NO;
-                        for (int round = 0; round < staySec / 5 + 1; round++) {
+                        int rounds = isVideoTask ? 1 : (staySec / 5 + 1);
+                        for (int round = 0; round < rounds; round++) {
                             [NSThread sleepForTimeInterval:5];
-                            autoTapNativeUI();
+                            if (!isVideoTask) {
+                                autoTapNativeUI();
+                            }
                             if (!wvLogged) {
                                 autoTapAllWebViews();
                                 wvLogged = YES;
                             }
+                        }
+                        if (isVideoTask) {
+                            // 视频：计时器结束 → 点右上角 X 关闭（用户要求精准）
+                            qqlog(@"[auto] 视频停留结束，点右上角 X 关闭…");
+                            [NSThread sleepForTimeInterval:2];
+                            qqfbTapCloseButton();
+                            [NSThread sleepForTimeInterval:1];
                         }
                         // 停留型任务：服务端按停留时长记账，不强制注入
                         qqlog(@"[auto] 停留结束，关闭容器回等级页验证…");
@@ -3694,18 +3732,43 @@ static void autoTapNativeUI(void) {
             if (!clicked && buttons.count == 0) {
                 qqlog(@"[autotap] 原生无可点按钮");
             }
-            // v1.8.1: kws 都没命中时，兜底点击第一个可见手势组件——
+            // v1.8.2: kws 都没命中时，兜底点击「屏幕中部的大手势组件」——
             // 小说书城的书卡片是 Kuikly 手势组件（无关键词标题），必须点进书才完成
-            //「看任一本书」。只点 gesture=YES 的组件，避免误点普通按钮。
+            //「看任一本书」。
+            // v1.8.3 修复（用户实测「拉起来小程序」）：不能无差别点第一个手势组件——
+            // 日志实锤点到了右上角 52×24 的返回/收起小按钮（frame=(378 64; 52 24)）
+            // 拉起小程序。书卡片在屏幕中部、尺寸较大（宽>100），按区域+尺寸筛选：
+            //   · 排除 y<120（顶部导航区：返回/关闭/分享按钮都在那）
+            //   · 排除 x>屏宽-80（右上角操作区）
+            //   · 只点 宽>=100 且 高>=80 的大卡片（书卡片/视频封面/礼包卡片）
             if (!clicked) {
+                CGSize scrSize = [UIScreen mainScreen].bounds.size;
+                NSMutableArray *candidates = [NSMutableArray array];
                 for (NSDictionary *item in buttons) {
                     if (![item[@"gesture"] boolValue]) continue;
                     UIControl *gv = item[@"btn"];
                     if (gv.hidden || gv.alpha <= 0.1) continue;
+                    CGRect f = gv.frame;
+                    CGFloat x = f.origin.x, y = f.origin.y;
+                    // 坐标基于窗口，Kuikly 全屏页 window 原点即屏幕原点
+                    if (y < 120) continue;              // 顶部导航区排除
+                    if (x > scrSize.width - 80) continue; // 右上角操作区排除
+                    if (f.size.width < 100 || f.size.height < 80) continue; // 只点大卡片
+                    [candidates addObject:item];
+                }
+                // 优先点最靠上方的中部大卡片（书城第一本书通常在列表顶部）
+                [candidates sortUsingComparator:^NSComparisonResult(id a, id b) {
+                    CGRect fa = [a[@"btn"] frame], fb = [b[@"btn"] frame];
+                    if (fa.origin.y < fb.origin.y) return NSOrderedAscending;
+                    return NSOrderedDescending;
+                }];
+                for (NSDictionary *item in candidates) {
+                    UIControl *gv = item[@"btn"];
                     @try {
                         for (UIGestureRecognizer *g in gv.gestureRecognizers) {
                             if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
                                 if (qqfbGestureInvoke(g, @"手势兜底点击")) {
+                                    qqlog(@"[autotap] 兜底点中区域: (%.0f,%.0f %.0fx%.0f)", gv.frame.origin.x, gv.frame.origin.y, gv.frame.size.width, gv.frame.size.height);
                                     clicked = YES;
                                 }
                                 if (clicked) break;
@@ -3720,6 +3783,95 @@ static void autoTapNativeUI(void) {
         });
     } @catch (NSException *e) {
         qqlog(@"[autotap] 原生遍历异常: %@", e);
+    }
+}
+
+// ── 点右上角 X 关闭按钮（v1.8.3 视频任务用）──
+// 用户实测视频任务「进去了就等右上角计时器结束了点击右上角的x 关闭就行」。
+// 遍历当前窗口找右上角区域的关闭组件：优先标题含 关闭/X/×/取消 的，
+// 其次右上角坐标区(x>屏宽-70, y<140)的手势组件（视频页关闭 X 无文字）。
+static void qqfbTapCloseButton(void) {
+    @try {
+        __block BOOL done = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CGSize scrSize = [UIScreen mainScreen].bounds.size;
+            NSMutableArray *buttons = [NSMutableArray array];
+            NSMutableArray *textViews = [NSMutableArray array];
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                collectNativeActionsInView(win, buttons, textViews);
+            }
+            // 1) 标题含 关闭/X/×/取消（视频广告页关闭按钮常见）
+            NSArray *closeKws = @[@"关闭", @"X", @"×", @"取消", @"✕"];
+            for (NSDictionary *item in buttons) {
+                NSString *t = item[@"title"];
+                for (NSString *kw in closeKws) {
+                    if ([t containsString:kw]) {
+                        UIView *bv = item[@"btn"];
+                        CGRect f = bv.frame;
+                        // 右上角优先，但也接受任意位置明确叫「关闭」的
+                        if (f.origin.x > scrSize.width - 120 || f.origin.y < 140) {
+                            if ([item[@"gesture"] boolValue]) {
+                                for (UIGestureRecognizer *g in bv.gestureRecognizers) {
+                                    if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                                        if (qqfbGestureInvoke(g, @"关闭按钮(关键词)")) { done = YES; break; }
+                                    }
+                                }
+                            } else {
+                                [(UIControl *)bv sendActionsForControlEvents:UIControlEventTouchUpInside];
+                                qqlog(@"[autotap] 关闭按钮(关键词): %@", t);
+                                done = YES;
+                            }
+                            if (done) break;
+                        }
+                    }
+                }
+                if (done) break;
+            }
+            // 2) 右上角无文字手势组件（X 图标）
+            if (!done) {
+                NSMutableArray *corners = [NSMutableArray array];
+                for (NSDictionary *item in buttons) {
+                    if (![item[@"gesture"] boolValue]) continue;
+                    UIView *bv = item[@"btn"];
+                    if (bv.hidden || bv.alpha <= 0.1) continue;
+                    CGRect f = bv.frame;
+                    // 右上角区域：x 在屏宽-90 以内靠右，y<140 顶部
+                    if (f.origin.x > scrSize.width - 90 && f.origin.y < 140 &&
+                        f.size.width < 80 && f.size.height < 80) {
+                        [corners addObject:item];
+                    }
+                }
+                // 优先最靠右上角的（X 通常在屏幕最右上）
+                [corners sortUsingComparator:^NSComparisonResult(id a, id b) {
+                    CGRect fa = [a[@"btn"] frame], fb = [b[@"btn"] frame];
+                    CGFloat da = (scrSize.width - fa.origin.x) + fa.origin.y;
+                    CGFloat db = (scrSize.width - fb.origin.x) + fb.origin.y;
+                    if (da < db) return NSOrderedAscending;
+                    return NSOrderedDescending;
+                }];
+                for (NSDictionary *item in corners) {
+                    UIView *bv = item[@"btn"];
+                    for (UIGestureRecognizer *g in bv.gestureRecognizers) {
+                        if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                            if (qqfbGestureInvoke(g, @"关闭按钮(右上角)")) {
+                                qqlog(@"[autotap] 右上角关闭: (%.0f,%.0f %.0fx%.0f)", bv.frame.origin.x, bv.frame.origin.y, bv.frame.size.width, bv.frame.size.height);
+                                done = YES; break;
+                            }
+                        }
+                    }
+                    if (done) break;
+                }
+            }
+            if (!done) {
+                qqlog(@"[autotap] 未找到关闭按钮，走 closeTopContainer 兜底");
+            }
+        });
+        // 等主线程执行完（同步等待）
+        for (int i = 0; i < 20 && !done; i++) {
+            [NSThread sleepForTimeInterval:0.05];
+        }
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] 关闭按钮异常: %@", e);
     }
 }
 

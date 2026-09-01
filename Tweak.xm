@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.4"
+#define kQQFloatBallVersion @"1.8.5"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1681,6 +1681,7 @@ static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
 static void qqfbTapCloseButton(void);
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
+static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 // v1.7.6: 0x9172 全量任务数据源（定义在 runAutoTasks 之后，须前向声明）
@@ -3599,6 +3600,47 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
     }
 }
 
+// ── 调 Kuikly css_click/css_touchUp block（v1.8.5，腾讯开源 KuiklyUI 实锤）──
+// KuiklyUI core-render-ios/Extension/Category/UIView+CSS.m：
+//   css_onClickTapWithSender: 里 css_click(@{x,y,pageX,pageY}) —— x/y 是组件本地坐标，
+//   pageX/pageY 是 Kuikly 渲染根视图坐标（kr_convertLocalPointToRenderRoot: 转换）。
+// 我们用组件中心点模拟点击；page 坐标通过动态调用 kr_convertLocalPointToRenderRoot: 转换，
+// 调用失败则退化为本地坐标（多数业务只用相对坐标判断命中区域，中心点必中）。
+static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag) {
+    @try {
+        if (!view || !block) return NO;
+        CGPoint center = CGPointMake(CGRectGetMidX(view.bounds), CGRectGetMidY(view.bounds));
+        CGPoint page = center;
+        // 动态调用 kr_convertLocalPointToRenderRoot:（Kuikly 私有但 category 公开）
+        SEL convSel = NSSelectorFromString(@"kr_convertLocalPointToRenderRoot:");
+        if (convSel && [view respondsToSelector:convSel]) {
+            NSMethodSignature *sig = [view methodSignatureForSelector:convSel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                inv.target = view;
+                inv.selector = convSel;
+                [inv setArgument:&center atIndex:2];
+                [inv invoke];
+                CGPoint outP;
+                [inv getReturnValue:&outP];
+                page = outP;
+            }
+        }
+        NSDictionary *param = @{
+            @"x": @(center.x), @"y": @(center.y),
+            @"pageX": @(page.x), @"pageY": @(page.y),
+        };
+        // KuiklyRenderCallback = void(^)(id) —— 直接调 block
+        void (^cb)(id) = block;
+        cb(param);
+        qqlog(@"[autotap] %@: %@ (%.0f,%.0f)", logTag, NSStringFromClass([view class]), page.x, page.y);
+        return YES;
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] Kuikly点击异常(%@): %@", logTag, e);
+        return NO;
+    }
+}
+
 // ── 递归收集可点击的原生按钮 + 可输入文本框 ──
 static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NSMutableArray *textViews) {
     if (!view) return;
@@ -3623,6 +3665,35 @@ static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NS
         }
         if (t.length > 0 && t.length <= 12) {
             [buttons addObject:@{@"btn": view, @"title": t}];
+        }
+    }
+    // v1.8.5（Kuikly 源码实锤）：Kuikly 页面的点击组件是「带 css_click block 的 UIView」——
+    // 腾讯开源 KuiklyUI core-render-ios/Extension/Category/UIView+CSS.m：
+    //   setCss_click: 时自动挂 UITapGestureRecognizer(css_tapGR, action=css_onClickTapWithSender:)
+    //   css_onClickTapWithSender: 调 css_click(@{x,y,pageX,pageY})
+    // 旧方案遍历 gestureRecognizers 找 tap 手势会误中 UITextNonEditableInteraction（UITapGestureRecognizer
+    // 私有子类，文本交互）→ 触发它=文本菜单不点书（v1.8.4 实锤）。直接调 css_click block 才是官方点击路径。
+    // 优先级：css_click > css_touchUp > 手势遍历
+    if (![view isKindOfClass:[UIControl class]] && !view.hidden && view.alpha > 0.1) {
+        // 1) css_click（业务点击，书卡片/立即领取都是它）
+        SEL cssClickSel = NSSelectorFromString(@"css_click");
+        if ([view respondsToSelector:cssClickSel]) {
+            id (*clickGetter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+            id clickBlock = clickGetter(view, cssClickSel);
+            if (clickBlock) {
+                NSString *t = view.accessibilityLabel ?: @"";
+                if (t.length == 0) t = @"(kuikly点击)";
+                [buttons addObject:@{@"btn": view, @"title": t, @"gesture": @NO, @"kuiklyClick": clickBlock}];
+            }
+        }
+        // 2) css_touchUp（KRView 触摸回调，普通触摸组件）
+        SEL cssTouchSel = NSSelectorFromString(@"css_touchUp");
+        if ([view respondsToSelector:cssTouchSel]) {
+            id (*touchGetter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+            id touchBlock = touchGetter(view, cssTouchSel);
+            if (touchBlock) {
+                [buttons addObject:@{@"btn": view, @"title": @"(kuikly触摸)", @"gesture": @NO, @"kuiklyTouch": touchBlock}];
+            }
         }
     }
     // v1.8.1: Kuikly 页面的可点击组件是「带 UITapGestureRecognizer 的 UIView」
@@ -3717,9 +3788,17 @@ static void autoTapNativeUI(void) {
                     if ([t containsString:kw]) {
                         UIControl *btn = item[@"btn"];
                         if (btn.hidden == NO && btn.alpha > 0.1) {
-                            // v1.8.1: Kuikly 手势组件（小说书城点书/福利社立即领取）——
-                            // 不是 UIControl，直接调手势的 target/action 模拟点击
-                            if ([item[@"gesture"] boolValue]) {
+                            // v1.8.5: Kuikly 组件优先——直接调 css_click/css_touchUp block
+                            //（官方点击路径，腾讯开源 KuiklyUI 实锤）
+                            id kuiklyClick = item[@"kuiklyClick"];
+                            id kuiklyTouch = item[@"kuiklyTouch"];
+                            if (kuiklyClick) {
+                                if (qqfbKuiklyInvoke(btn, kuiklyClick, @"Kuikly点击")) { clicked = YES; }
+                            } else if (kuiklyTouch) {
+                                if (qqfbKuiklyInvoke(btn, kuiklyTouch, @"Kuikly触摸")) { clicked = YES; }
+                            } else if ([item[@"gesture"] boolValue]) {
+                                // v1.8.1: Kuikly 手势组件（小说书城点书/福利社立即领取）——
+                                // 不是 UIControl，直接调手势的 target/action 模拟点击
                                 UIView *gv = (UIView *)btn;
                                 for (UIGestureRecognizer *g in gv.gestureRecognizers) {
                                     if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
@@ -3771,10 +3850,15 @@ static void autoTapNativeUI(void) {
                     if (y < 120) continue;              // 顶部导航区排除
                     if (x > scrSize.width - 80) continue; // 右上角操作区排除
                     if (f.size.width < 100 || f.size.height < 80) continue; // 只点大卡片
+                    // v1.8.5: 书卡片是带 css_click 的 Kuikly 组件（无关键词标题）——
+                    // 手势组件也收（老 Kuikly 页面可能只挂手势），但 Kuikly block 优先
                     [candidates addObject:item];
                 }
-                // 优先点最靠上方的中部大卡片（书城第一本书通常在列表顶部）
+                // v1.8.5: Kuikly 组件优先（css_click=官方业务点击），手势组件兜底
                 [candidates sortUsingComparator:^NSComparisonResult(id a, id b) {
+                    BOOL aK = [a[@"kuiklyClick"] boolValue] || [a[@"kuiklyTouch"] boolValue];
+                    BOOL bK = [b[@"kuiklyClick"] boolValue] || [b[@"kuiklyTouch"] boolValue];
+                    if (aK != bK) return aK ? NSOrderedAscending : NSOrderedDescending;
                     CGRect fa = [a[@"btn"] frame], fb = [b[@"btn"] frame];
                     if (fa.origin.y < fb.origin.y) return NSOrderedAscending;
                     return NSOrderedDescending;
@@ -3782,13 +3866,27 @@ static void autoTapNativeUI(void) {
                 for (NSDictionary *item in candidates) {
                     UIControl *gv = item[@"btn"];
                     @try {
-                        for (UIGestureRecognizer *g in gv.gestureRecognizers) {
-                            if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
-                                if (qqfbGestureInvoke(g, @"手势兜底点击")) {
-                                    qqlog(@"[autotap] 兜底点中区域: (%.0f,%.0f %.0fx%.0f)", gv.frame.origin.x, gv.frame.origin.y, gv.frame.size.width, gv.frame.size.height);
-                                    clicked = YES;
+                        id kuiklyClick = item[@"kuiklyClick"];
+                        id kuiklyTouch = item[@"kuiklyTouch"];
+                        if (kuiklyClick) {
+                            if (qqfbKuiklyInvoke(gv, kuiklyClick, @"Kuikly兜底点击")) {
+                                qqlog(@"[autotap] 兜底点中区域: (%.0f,%.0f %.0fx%.0f)", gv.frame.origin.x, gv.frame.origin.y, gv.frame.size.width, gv.frame.size.height);
+                                clicked = YES;
+                            }
+                        } else if (kuiklyTouch) {
+                            if (qqfbKuiklyInvoke(gv, kuiklyTouch, @"Kuikly兜底触摸")) {
+                                qqlog(@"[autotap] 兜底点中区域: (%.0f,%.0f %.0fx%.0f)", gv.frame.origin.x, gv.frame.origin.y, gv.frame.size.width, gv.frame.size.height);
+                                clicked = YES;
+                            }
+                        } else {
+                            for (UIGestureRecognizer *g in gv.gestureRecognizers) {
+                                if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                                    if (qqfbGestureInvoke(g, @"手势兜底点击")) {
+                                        qqlog(@"[autotap] 兜底点中区域: (%.0f,%.0f %.0fx%.0f)", gv.frame.origin.x, gv.frame.origin.y, gv.frame.size.width, gv.frame.size.height);
+                                        clicked = YES;
+                                    }
+                                    if (clicked) break;
                                 }
-                                if (clicked) break;
                             }
                         }
                     } @catch (NSException *e) {

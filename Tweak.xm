@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.3"
+#define kQQFloatBallVersion @"1.7.4"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -2579,12 +2579,9 @@ static CGFloat safeTopInset(void) {
 
 // ── 显示任务面板 ──
 static void showTaskPanel(void) {
-    if (_taskPanel) { // 已开则收起
-        [_taskPanel removeFromSuperview];
-        _taskPanel = nil;
-        _logView = nil;
-        _logTextView = nil;
-        _taskScroll = nil;
+    if (_taskPanel) { // 已存在：收起↔展开切换（v1.7.4 不再销毁，日志保留）
+        _taskPanel.hidden = !_taskPanel.hidden;
+        if (!_taskPanel.hidden) renderTaskRows();
         return;
     }
     if (!_floatWindow) return;
@@ -2618,7 +2615,8 @@ static void showTaskPanel(void) {
     [panel addSubview:titleLb];
 
     // 标题栏拖动条：扩大可拖区域；右侧按钮区域保留点击能力。
-    UIView *dragBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w - 190, 40)];
+    // v1.7.4: 拖宽加大到 w-120，整条标题栏都可拖（原 w-190 太窄不好拖）
+    UIView *dragBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w - 120, 40)];
     dragBar.backgroundColor = [UIColor clearColor];
     dragBar.userInteractionEnabled = YES;
     UIPanGestureRecognizer *panelPan = [[UIPanGestureRecognizer alloc] initWithTarget:[UIApplication sharedApplication]
@@ -2651,25 +2649,16 @@ static void showTaskPanel(void) {
     // ══ 分区2：任务状态 ══
     sectionLabel(102, @"📋 任务状态");
     UIButton *runBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    runBtn.frame = CGRectMake(6, 120, (w - 15) / 2, 30);
-    [runBtn setTitle:@"🔄 获取任务" forState:UIControlStateNormal];
+    // v1.7.4: 全宽按钮（原「📊 刷新状态」废按钮已删——它只读本地旧文件不重新抓取，
+    //          真正的刷新流程=点「🔄 获取任务」→自动开抓包→跳等级页→等新0x9172→列表自动刷新）
+    runBtn.frame = CGRectMake(6, 120, w - 12, 30);
+    [runBtn setTitle:@"🔄 获取任务（自动抓包+跳等级页+自动刷新）" forState:UIControlStateNormal];
     [runBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     runBtn.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
     runBtn.layer.cornerRadius = 6;
     runBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
     [runBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRunLevelTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:runBtn];
-
-    // v1.3-test: 刷新任务状态按钮（读取 qqtask_status.json，显示 0x9172 解析结果）+ v1.6.6 一键自动任务
-    UIButton *statusBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    statusBtn.frame = CGRectMake(9 + (w - 15) / 2, 120, (w - 15) / 2, 30);
-    [statusBtn setTitle:@"📊 刷新状态" forState:UIControlStateNormal];
-    [statusBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    statusBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
-    statusBtn.layer.cornerRadius = 6;
-    statusBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
-    [statusBtn addTarget:[UIApplication sharedApplication] action:@selector(_taskRefreshStatusTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:statusBtn];
 
     // ══ 分区3：抓包调试（排查用，弱化）══
     sectionLabel(156, @"🔧 抓包调试");
@@ -2895,7 +2884,6 @@ __attribute__((unused)) static void showLogPanel(void) {
 - (void)_taskCaptureTapped:(UIButton *)sender;
 - (void)_taskStopCaptureTapped:(UIButton *)sender;
 - (void)_taskRunLevelTapped:(UIButton *)sender;
-- (void)_taskRefreshStatusTapped:(UIButton *)sender;
 @end
 
 %hook UIApplication
@@ -2966,49 +2954,6 @@ __attribute__((unused)) static void showLogPanel(void) {
 }
 
 %new
-- (void)_taskRefreshStatusTapped:(UIButton *)sender {
-    // v1.3-test: 读取 Documents/qqtask_status.json，把 0x9172 解析出的任务状态显示到日志区
-    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqtask_status.json"];
-    NSData *jd = [NSData dataWithContentsOfFile:path];
-    if (!jd || jd.length == 0) {
-        appendLogView(@"📊 还没有任务状态数据：请先「打开并抓取」进入等级页，等捕获到 0x9172 后再刷新");
-        return;
-    }
-    @try {
-        NSError *err = nil;
-        NSDictionary *root = [NSJSONSerialization JSONObjectWithData:jd options:0 error:&err];
-        if (![root isKindOfClass:[NSDictionary class]]) {
-            appendLogView([NSString stringWithFormat:@"📊 状态文件解析失败：%@", err]);
-            return;
-        }
-        NSArray *tasks = root[@"tasks"];
-        NSNumber *cnt = root[@"taskCount"];
-        NSNumber *ts = root[@"capturedAt"];
-        NSString *when = @"";
-        if ([ts isKindOfClass:[NSNumber class]]) {
-            NSDate *d = [NSDate dateWithTimeIntervalSince1970:[ts doubleValue]];
-            NSDateFormatter *df = [[NSDateFormatter alloc] init];
-            df.dateFormat = @"HH:mm:ss";
-            when = [df stringFromDate:d];
-        }
-        int doneN = 0, endN = 0, todoN = 0;
-        for (NSDictionary *t in tasks) {
-            int st = [t[@"status"] intValue];
-            if (st == 1) doneN++; else if (st == 2) endN++; else todoN++;
-        }
-        appendLogView([NSString stringWithFormat:@"📊 ── 任务状态（抓取于 %@，共 %@ 个）──", when, cnt ?: @0]);
-        appendLogView([NSString stringWithFormat:@"   ✅已完成 %d ｜ ⏳待完成 %d ｜ 🔒已结束 %d", doneN, todoN, endN]);
-        for (NSDictionary *t in tasks) {
-            int st = [t[@"status"] intValue];
-            NSString *flag = (st == 1) ? @"✅" : (st == 2) ? @"🔒" : @"⏳";
-            appendLogView([NSString stringWithFormat:@"%@ %@（%@）", flag, t[@"title"] ?: @"?", t[@"button"] ?: @""]);
-        }
-    } @catch (NSException *e) {
-        appendLogView([NSString stringWithFormat:@"📊 显示异常：%@", e]);
-    }
-}
-
-%new
 - (void)_taskAutoRunTapped:(UIButton *)sender {
     // v1.6.7: 完整自动导航（HTTP 直调 + 跳页面自动点击 + 回查状态），覆盖全部可做任务
     appendLogView(@"🚀 一键自动任务启动…（HTTP直调 + 自动导航遍历全部任务）");
@@ -3017,12 +2962,10 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskCloseTapped:(UIButton *)sender {
+    // v1.7.4: ✕ = 收起面板（隐藏），不销毁——日志/状态保留，点浮球可恢复
+    // （旧实现 removeFromSuperview+置nil 导致日志面板消失后无法找回）
     if (_taskPanel) {
-        [_taskPanel removeFromSuperview];
-        _taskPanel = nil;
-        _logView = nil;
-        _logTextView = nil;
-        _taskScroll = nil;
+        _taskPanel.hidden = YES;
     }
 }
 

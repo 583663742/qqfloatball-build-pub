@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.9"
+#define kQQFloatBallVersion @"1.8.0"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3380,15 +3380,16 @@ static void autoTapWebView(id webView) {
         // v1.7.8: 「注入页面」日志降噪——只有 JS 实际点了按钮或报错才打
         // （旧版每次注入都打，5 轮×N 页面刷屏，用户「看了都费劲」）
         // qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
-        // v1.7.5: URL 为空的容器（Kuikly 原生壳/未加载完）注入无效，跳过——等页面真正加载出来
-        //（实测：盲盒签 result 页注入全返回空，其中一部分是空 URL 的 Kuikly 容器）
-        if (url.length == 0) {
-            qqlog(@"[autotap] 页面 URL 为空（容器/加载中），跳过本轮注入");
-            return;
-        }
+        // v1.7.9 修复：URL 为空的容器**也要注入**——这些是 Kuikly 页面的
+        // WKWebView 渲染层（响应 evaluateJavaScript:，只是 URL KVC 读不出）。
+        // v1.7.5 误加「url.length==0 跳过」导致 Kuikly 任务页（小说书城/福利社/
+        // 盲盒签等）的 JS 注入全部被跳过 → 「未找到 WKWebView」→ 领券不点/小说不点。
+        // 实测 v1.7.5 日志 36 次「注入页面: (空)」就是被跳过的 Kuikly 容器。
+        // 注：盲盒签 result 页注入返回空是结果页真没按钮，不是 JS 无效。
+        // 空 URL 容器只打一次日志防刷屏
         NSString *js =
         @"(function(){"
-        "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','领福利'];"
+        "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','领福利','免费阅读','试读','开始阅读'];"
         "  var skipWords=['已打卡','今日已打卡','已完成','已领取','已发布','已参与','已签到','已达成','已获得','已领取奖励','已奖励','已领','已完'];"
         "  function isSkip(t){ for(var i=0;i<skipWords.length;i++){ if(t.indexOf(skipWords[i])!==-1) return true; } return false; }"
         "  function tryClick(root){"
@@ -3409,7 +3410,22 @@ static void autoTapWebView(id webView) {
         "    return '';"
         "  }"
         "  var r=tryClick(document);"
-        "  if(!r){ window.scrollTo(0,document.body.scrollHeight); setTimeout(function(){r=tryClick(document);},800); }"
+        "  if(!r){"
+        "    // v1.7.9: 小说书城等列表页 fallback——没有按钮词时点第一个可点链接（进书详情/下一页）"
+        "    var links=document.querySelectorAll('a');"
+        "    for(var i=0;i<links.length;i++){"
+        "      var a=links[i];"
+        "      if(a.offsetParent===null) continue;"
+        "      var h=a.href||'';"
+        "      var at=(a.innerText||a.textContent||'').trim();"
+        "      if(h && at.length>0 && at.length<=20 && !isSkip(at)){"
+        "        a.click();"
+        "        return '点链接:'+at;"
+        "      }"
+        "    }"
+        "    window.scrollTo(0,document.body.scrollHeight);"
+        "    setTimeout(function(){r=tryClick(document);},800);"
+        "  }"
         "  return r;"
         "})()";
         void (^handler)(id, NSError *) = ^(id result, NSError *err) {

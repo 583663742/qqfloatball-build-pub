@@ -726,6 +726,8 @@ static NSDictionary *pbScan9172Groups(const uint8_t *b, NSUInteger len, NSMutabl
     return counts;
 }
 
+static void refreshTaskListUI(void);   // v1.7.2 前向声明：qqfbParse9172AndSave(764行) 先于定义(2526行)调用
+
 // 解析 0x9172 pbBody → 写 qqtask_status.json，返回任务数（失败返回 -1）
 static int qqfbParse9172AndSave(NSData *pbBody) {
     @try {
@@ -1595,7 +1597,6 @@ static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
-static void refreshTaskListUI(void);        // v1.7.2: qqfbParse9172AndSave(730行) 先于定义(2521行)调用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 
 // ══════════════════════════════════════════

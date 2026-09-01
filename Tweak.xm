@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.8"
+#define kQQFloatBallVersion @"1.7.9"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3510,11 +3510,27 @@ static void autoTapAllWebViews(void) {
 // ── 递归收集可点击的原生按钮 + 可输入文本框 ──
 static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NSMutableArray *textViews) {
     if (!view) return;
-    if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        NSString *t = btn.currentTitle ?: @"";
+    // v1.7.9: 从「只收 UIButton」放宽为「收所有 UIControl」——QQ 空间说说的「发表」
+    // 在导航栏右上角，是 UIBarButtonItem 内部视图（_UIButtonBarButton 继承 UIControl
+    // 而非 UIButton），旧代码收集不到 → 「原生点击: 发表」从未出现 → 任务失败
+    if ([view isKindOfClass:[UIControl class]]) {
+        NSString *t = @"";
+        @try {
+            // UIButton 直接读 currentTitle；UIBarButtonItem 内部按钮读 accessibilityLabel
+            if ([view respondsToSelector:@selector(currentTitle)]) {
+                t = ((UIButton *)view).currentTitle ?: @"";
+            }
+            if (t.length == 0) {
+                t = view.accessibilityLabel ?: @"";
+            }
+            if (t.length == 0 && [view respondsToSelector:@selector(titleLabel)]) {
+                t = ((UIButton *)view).titleLabel.text ?: @"";
+            }
+        } @catch (NSException *e) {
+            t = @"";
+        }
         if (t.length > 0 && t.length <= 12) {
-            [buttons addObject:@{@"btn": btn, @"title": t}];
+            [buttons addObject:@{@"btn": view, @"title": t}];
         }
     } else if ([view isKindOfClass:[UITextView class]]) {
         [textViews addObject:view];
@@ -3543,7 +3559,11 @@ static void autoTapNativeUI(void) {
                     if ([tv respondsToSelector:@selector(setText:)]) {
                         NSString *cur = [tv valueForKey:@"text"] ?: @"";
                         if (cur.length == 0) {
-                            [tv setValue:@"等级任务" forKey:@"text"];
+                            // v1.7.9: 内容改为「等级任务 + 今天日期」（用户要求：内容应该是 等级任务今天的日期）
+                            NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+                            fmt.dateFormat = @"yyyy-MM-dd";
+                            NSString *today = [fmt stringFromDate:[NSDate date]];
+                            [tv setValue:[NSString stringWithFormat:@"等级任务 %@", today] forKey:@"text"];
                             // v1.7.8 关键修复：QQ 发表按钮监听 textViewDidChange: 才点亮，
                             // 直接 setText 不触发 delegate → 按钮永远 disabled 点不了（用户实测
                             // 「粘贴进去文字了但发表按键不亮」）。填字后手动触发 delegate 回调 +
@@ -3575,7 +3595,7 @@ static void autoTapNativeUI(void) {
                 NSString *t = item[@"title"];
                 for (NSString *kw in kws) {
                     if ([t containsString:kw]) {
-                        UIButton *btn = item[@"btn"];
+                        UIControl *btn = item[@"btn"];
                         if (btn.hidden == NO && btn.alpha > 0.1) {
                             // v1.7.8: 若按钮 disabled 但标题是发表/发布/发送（需文字才点亮），
                             // 文字已填+delegate 已触发，此时强制 sendActions 也能触发逻辑

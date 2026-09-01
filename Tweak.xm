@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.5"
+#define kQQFloatBallVersion @"1.8.6"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3900,7 +3900,9 @@ static void autoTapNativeUI(void) {
                 CGSize scrSize = [UIScreen mainScreen].bounds.size;
                 NSMutableArray *candidates = [NSMutableArray array];
                 for (NSDictionary *item in buttons) {
-                    if (![item[@"gesture"] boolValue]) continue;
+                    // v1.8.5: 不能只收 gesture 组件——css_click/kuiklyTouch 组件
+                    //（书卡片）gesture=@NO，会被这行误杀（日志实锤兜底永远点文本链接）。
+                    if (![item[@"gesture"] boolValue] && !item[@"kuiklyClick"] && !item[@"kuiklyTouch"]) continue;
                     UIControl *gv = item[@"btn"];
                     if (gv.hidden || gv.alpha <= 0.1) continue;
                     CGRect f = gv.frame;
@@ -4005,7 +4007,8 @@ static void qqfbTapCloseButton(void) {
             if (!done) {
                 NSMutableArray *corners = [NSMutableArray array];
                 for (NSDictionary *item in buttons) {
-                    if (![item[@"gesture"] boolValue]) continue;
+                    // v1.8.5: Kuikly 关闭按钮也是 css_click 组件（gesture=@NO），不能只收手势
+                    if (![item[@"gesture"] boolValue] && !item[@"kuiklyClick"] && !item[@"kuiklyTouch"]) continue;
                     UIView *bv = item[@"btn"];
                     if (bv.hidden || bv.alpha <= 0.1) continue;
                     CGRect f = bv.frame;

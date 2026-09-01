@@ -3369,24 +3369,8 @@ static void autoTapWebView(id webView) {
         if (!webView) return;
         SEL evalSel = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
         if (![webView respondsToSelector:evalSel]) return;
-        // v1.6.9: 安全读取 URL——QQWebView 老容器无 URL KVC，用 try-catch 保护
-        NSString *url = @"";
-        @try {
-            NSURL *u = [webView valueForKey:@"URL"];
-            url = u.absoluteString ?: @"";
-        } @catch (NSException *e) {
-            url = @"";
-        }
-        // v1.7.8: 「注入页面」日志降噪——只有 JS 实际点了按钮或报错才打
-        // （旧版每次注入都打，5 轮×N 页面刷屏，用户「看了都费劲」）
-        // qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
-        // v1.7.9 修复：URL 为空的容器**也要注入**——这些是 Kuikly 页面的
-        // WKWebView 渲染层（响应 evaluateJavaScript:，只是 URL KVC 读不出）。
-        // v1.7.5 误加「url.length==0 跳过」导致 Kuikly 任务页（小说书城/福利社/
-        // 盲盒签等）的 JS 注入全部被跳过 → 「未找到 WKWebView」→ 领券不点/小说不点。
-        // 实测 v1.7.5 日志 36 次「注入页面: (空)」就是被跳过的 Kuikly 容器。
-        // 注：盲盒签 result 页注入返回空是结果页真没按钮，不是 JS 无效。
-        // 空 URL 容器只打一次日志防刷屏
+        // v1.8.0: 不再读 URL 判断跳过——Kuikly 容器 URL KVC 读不出但能执行 JS，
+        // 一律注入（「注入页面」日志只在 JS 有结果时打，防刷屏）
         NSString *js =
         @"(function(){"
         "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','领福利','免费阅读','试读','开始阅读'];"

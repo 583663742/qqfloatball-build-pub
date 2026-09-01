@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.7"
+#define kQQFloatBallVersion @"1.8.8"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3601,32 +3601,29 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
     }
 }
 
-// ── 调 Kuikly css_click/css_touchUp block（v1.8.5，腾讯开源 KuiklyUI 实锤）──
+// ── 触发 Kuikly 组件点击（v1.8.8，腾讯开源 KuiklyUI 实锤 + 闪退实锤修正）──
 // KuiklyUI core-render-ios/Extension/Category/UIView+CSS.m：
-//   css_onClickTapWithSender: 里 css_click(@{x,y,pageX,pageY}) —— x/y 是组件本地坐标，
-//   pageX/pageY 是 Kuikly 渲染根视图坐标。
-// v1.8.7: 去掉 kr_convertLocalPointToRenderRoot: 的 NSInvocation 调用（CGPoint 结构体
-// ABI 风险，闪退嫌疑）——page 坐标改用 convertRect:toWindow: 转换到窗口坐标（Kuikly
-// 根视图即全屏窗口，窗口坐标=渲染根坐标，业务命中区域判断不受影响）。
+//   setCss_click: 时创建 UITapGestureRecognizer(css_tapGR)，target=view,
+//   action=css_onClickTapWithSender: —— 手势触发后 Kuikly 自己调 css_click block。
+// v1.8.7 闪退实锤：**直接调 css_click block 会崩**（绕过 Kuikly 手势状态管理，
+// 崩溃日志 dump 走到 KuiklyRenderView 中断 + v1.8.5 从不调 block 不崩 为证）。
+// v1.8.8 正解：找 view 上的 UITapGestureRecognizer（css_tapGR），走官方手势触发
+// 路径（qqfbGestureInvoke 调 target/action），Kuikly 内部自己调 block —— 安全。
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag) {
     @try {
-        if (!view || !block) return NO;
-        CGPoint center = CGPointMake(CGRectGetMidX(view.bounds), CGRectGetMidY(view.bounds));
-        CGPoint page = center;
-        UIWindow *win = view.window;
-        if (win) {
-            CGPoint inWin = [view convertPoint:center toView:win];
-            page = inWin;
+        if (!view) return NO;
+        // 优先找 view 自带的 UITapGestureRecognizer（css_tapGR）——官方点击手势
+        for (UIGestureRecognizer *g in view.gestureRecognizers) {
+            if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+            NSString *cls = NSStringFromClass([g class]);
+            // 排除文本交互子类（UITextNonEditableInteraction 等，弹文本菜单不点击）
+            if ([cls containsString:@"UIText"] || [cls containsString:@"TextInteraction"]) continue;
+            if (qqfbGestureInvoke(g, logTag)) return YES;
         }
-        NSDictionary *param = @{
-            @"x": @(center.x), @"y": @(center.y),
-            @"pageX": @(page.x), @"pageY": @(page.y),
-        };
-        // KuiklyRenderCallback = void(^)(id) —— 直接调 block
-        void (^cb)(id) = block;
-        cb(param);
-        qqlog(@"[autotap] %@: %@ (%.0f,%.0f)", logTag, NSStringFromClass([view class]), page.x, page.y);
-        return YES;
+        // 手势找不到（极端情况）→ 用 touchUp 的「手势触发」：调 view 的触摸回调
+        qqlog(@"[autotap] %@: %@ 无tap手势(%lu个)", logTag, NSStringFromClass([view class]),
+              (unsigned long)view.gestureRecognizers.count);
+        return NO;
     } @catch (NSException *e) {
         qqlog(@"[autotap] Kuikly点击异常(%@): %@", logTag, e);
         return NO;

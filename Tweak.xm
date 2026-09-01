@@ -1682,6 +1682,7 @@ static void autoTapNativeUI(void);
 static void qqfbTapCloseButton(void);
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag);
+static void qqfbDumpViewTree(void);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 // v1.7.6: 0x9172 全量任务数据源（定义在 runAutoTasks 之后，须前向声明）
@@ -2114,6 +2115,12 @@ static void runAutoTasks(void) {
                     // （v1.7.5 加它防旧页面残留，但验证本身已保证回到等级页）
 
                     if (isStayTask) {
+                        // v1.8.5 debug: 小说任务跳转后 dump 视图树，实锤书卡片组件结构
+                        if ([title containsString:@"小说"] || [title containsString:@"书"]) {
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                qqfbDumpViewTree();
+                            });
+                        }
                         // v1.8.3: 福利社领券——非会员做不了（日志实锤 isSvip=false，
                         // 用户明确「不是会员就做不了那个领券的任务」），直接跳过不浪费时间乱点
                         if ([title containsString:@"福利社"] && !_userIsSvip) {
@@ -3597,6 +3604,58 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
     } @catch (NSException *e) {
         qqlog(@"[autotap] 手势触发异常(%@): %@", logTag, e);
         return NO;
+    }
+}
+
+// ── debug: dump 当前窗口视图树（v1.8.5 小说书城结构实锤）──
+// 打印：类名 frame + css_click/css_touchUp block 有无 + 手势类型，最多 60 个节点
+static void qqfbDumpViewTree(void) {
+    @try {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            qqlog(@"[dump] ===== 视图树开始 =====");
+            int depth = 0;
+            __block int count = 0;
+            __block void (^walk)(UIView *, int);
+            walk = ^(UIView *v, int d) {
+                if (!v || count >= 60) return;
+                count++;
+                NSString *indent = [@"" stringByPaddingToLength:d*2 withString:@" " startingAtIndex:0];
+                NSString *cls = NSStringFromClass([v class]);
+                CGRect f = v.frame;
+                NSString *extra = @"";
+                SEL clickSel = NSSelectorFromString(@"css_click");
+                SEL touchSel = NSSelectorFromString(@"css_touchUp");
+                if ([v respondsToSelector:clickSel]) {
+                    id (*getter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+                    id b = getter(v, clickSel);
+                    if (b) extra = [extra stringByAppendingString:@" [css_click]"];
+                }
+                if ([v respondsToSelector:touchSel]) {
+                    id (*getter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+                    id b = getter(v, touchSel);
+                    if (b) extra = [extra stringByAppendingString:@" [css_touchUp]"];
+                }
+                if (v.gestureRecognizers.count > 0) {
+                    for (UIGestureRecognizer *g in v.gestureRecognizers) {
+                        extra = [extra stringByAppendingFormat:@" [%@]", NSStringFromClass([g class])];
+                    }
+                }
+                NSString *acc = v.accessibilityLabel;
+                if (acc.length > 0) extra = [extra stringByAppendingFormat:@" acc=%@", acc];
+                qqlog(@"[dump] %@%@ frame=(%.0f,%.0f %.0fx%.0f)%@", indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, extra);
+                for (UIView *sub in v.subviews) {
+                    walk(sub, d+1);
+                }
+            };
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                if (win.hidden) continue;
+                qqlog(@"[dump] window=%@", NSStringFromClass([win class]));
+                walk(win, 1);
+            }
+            qqlog(@"[dump] ===== 视图树结束 (%d 节点) =====", count);
+        });
+    } @catch (NSException *e) {
+        qqlog(@"[dump] 异常: %@", e);
     }
 }
 

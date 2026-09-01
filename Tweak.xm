@@ -3639,15 +3639,18 @@ static void autoTapNativeUI(void) {
                                     if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
                                         id target = [g valueForKey:@"_targets"]; // NSArray of UIGestureRecognizerTarget
                                         @try {
-                                            id tgt = [(NSArray *)target firstObject];
-                                            id obj = [tgt valueForKey:@"_target"];
-                                            NSValue *actVal = [tgt valueForKey:@"_action"];
-                                            SEL action = actVal.pointerValue;
-                                            if (obj && action) {
-                                                [obj performSelector:action withObject:g];
-                                                qqlog(@"[autotap] 手势点击: %@", t);
-                                                clicked = YES;
-                                            }
+                                        id tgt = [(NSArray *)target firstObject];
+                                        id obj = [tgt valueForKey:@"_target"];
+                                        NSValue *actVal = [tgt valueForKey:@"_action"];
+                                        SEL action = (SEL)actVal.pointerValue;
+                                        if (obj && action) {
+                                        #pragma clang diagnostic push
+                                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                            [obj performSelector:action withObject:g];
+                                        #pragma clang diagnostic pop
+                                            qqlog(@"[autotap] 手势点击: %@", t);
+                                            clicked = YES;
+                                        }
                                         } @catch (NSException *e) {
                                             qqlog(@"[autotap] 手势触发异常: %@", e);
                                         }
@@ -3689,9 +3692,12 @@ static void autoTapNativeUI(void) {
                                 id tgt = [(NSArray *)target firstObject];
                                 id obj = [tgt valueForKey:@"_target"];
                                 NSValue *actVal = [tgt valueForKey:@"_action"];
-                                SEL action = actVal.pointerValue;
+                                SEL action = (SEL)actVal.pointerValue;
                                 if (obj && action) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                                     [obj performSelector:action withObject:g];
+#pragma clang diagnostic pop
                                     qqlog(@"[autotap] 手势兜底点击: %@", item[@"title"]);
                                     clicked = YES;
                                 }

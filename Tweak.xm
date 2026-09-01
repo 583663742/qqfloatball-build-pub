@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.6"
+#define kQQFloatBallVersion @"1.8.7"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1682,7 +1682,7 @@ static void autoTapNativeUI(void);
 static void qqfbTapCloseButton(void);
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag);
-static void qqfbDumpViewTree(void);
+// v1.8.7: qqfbDumpViewTree 已移除（诊断完成，dump 遍历 Kuikly 深层视图有闪退嫌疑）
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 // v1.7.6: 0x9172 全量任务数据源（定义在 runAutoTasks 之后，须前向声明）
@@ -2115,12 +2115,6 @@ static void runAutoTasks(void) {
                     // （v1.7.5 加它防旧页面残留，但验证本身已保证回到等级页）
 
                     if (isStayTask) {
-                        // v1.8.5 debug: 小说任务跳转后 dump 视图树，实锤书卡片组件结构
-                        if ([title containsString:@"小说"] || [title containsString:@"书"]) {
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                qqfbDumpViewTree();
-                            });
-                        }
                         // v1.8.3: 福利社领券——非会员做不了（日志实锤 isSvip=false，
                         // 用户明确「不是会员就做不了那个领券的任务」），直接跳过不浪费时间乱点
                         if ([title containsString:@"福利社"] && !_userIsSvip) {
@@ -3607,83 +3601,22 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
     }
 }
 
-// ── debug: dump 当前窗口视图树（v1.8.5 小说书城结构实锤）──
-// 打印：类名 frame + css_click/css_touchUp block 有无 + 手势类型，最多 60 个节点
-static void qqfbDumpViewTree(void) {
-    @try {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            qqlog(@"[dump] ===== 视图树开始 =====");
-            int depth = 0;
-            __block int count = 0;
-            __block void (^walk)(UIView *, int);
-            walk = ^(UIView *v, int d) {
-                if (!v || count >= 60) return;
-                count++;
-                NSString *indent = [@"" stringByPaddingToLength:d*2 withString:@" " startingAtIndex:0];
-                NSString *cls = NSStringFromClass([v class]);
-                CGRect f = v.frame;
-                NSString *extra = @"";
-                SEL clickSel = NSSelectorFromString(@"css_click");
-                SEL touchSel = NSSelectorFromString(@"css_touchUp");
-                if ([v respondsToSelector:clickSel]) {
-                    id (*getter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-                    id b = getter(v, clickSel);
-                    if (b) extra = [extra stringByAppendingString:@" [css_click]"];
-                }
-                if ([v respondsToSelector:touchSel]) {
-                    id (*getter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-                    id b = getter(v, touchSel);
-                    if (b) extra = [extra stringByAppendingString:@" [css_touchUp]"];
-                }
-                if (v.gestureRecognizers.count > 0) {
-                    for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        extra = [extra stringByAppendingFormat:@" [%@]", NSStringFromClass([g class])];
-                    }
-                }
-                NSString *acc = v.accessibilityLabel;
-                if (acc.length > 0) extra = [extra stringByAppendingFormat:@" acc=%@", acc];
-                qqlog(@"[dump] %@%@ frame=(%.0f,%.0f %.0fx%.0f)%@", indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, extra);
-                for (UIView *sub in v.subviews) {
-                    walk(sub, d+1);
-                }
-            };
-            for (UIWindow *win in [UIApplication sharedApplication].windows) {
-                if (win.hidden) continue;
-                qqlog(@"[dump] window=%@", NSStringFromClass([win class]));
-                walk(win, 1);
-            }
-            qqlog(@"[dump] ===== 视图树结束 (%d 节点) =====", count);
-        });
-    } @catch (NSException *e) {
-        qqlog(@"[dump] 异常: %@", e);
-    }
-}
-
 // ── 调 Kuikly css_click/css_touchUp block（v1.8.5，腾讯开源 KuiklyUI 实锤）──
 // KuiklyUI core-render-ios/Extension/Category/UIView+CSS.m：
 //   css_onClickTapWithSender: 里 css_click(@{x,y,pageX,pageY}) —— x/y 是组件本地坐标，
-//   pageX/pageY 是 Kuikly 渲染根视图坐标（kr_convertLocalPointToRenderRoot: 转换）。
-// 我们用组件中心点模拟点击；page 坐标通过动态调用 kr_convertLocalPointToRenderRoot: 转换，
-// 调用失败则退化为本地坐标（多数业务只用相对坐标判断命中区域，中心点必中）。
+//   pageX/pageY 是 Kuikly 渲染根视图坐标。
+// v1.8.7: 去掉 kr_convertLocalPointToRenderRoot: 的 NSInvocation 调用（CGPoint 结构体
+// ABI 风险，闪退嫌疑）——page 坐标改用 convertRect:toWindow: 转换到窗口坐标（Kuikly
+// 根视图即全屏窗口，窗口坐标=渲染根坐标，业务命中区域判断不受影响）。
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag) {
     @try {
         if (!view || !block) return NO;
         CGPoint center = CGPointMake(CGRectGetMidX(view.bounds), CGRectGetMidY(view.bounds));
         CGPoint page = center;
-        // 动态调用 kr_convertLocalPointToRenderRoot:（Kuikly 私有但 category 公开）
-        SEL convSel = NSSelectorFromString(@"kr_convertLocalPointToRenderRoot:");
-        if (convSel && [view respondsToSelector:convSel]) {
-            NSMethodSignature *sig = [view methodSignatureForSelector:convSel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                inv.target = view;
-                inv.selector = convSel;
-                [inv setArgument:&center atIndex:2];
-                [inv invoke];
-                CGPoint outP;
-                [inv getReturnValue:&outP];
-                page = outP;
-            }
+        UIWindow *win = view.window;
+        if (win) {
+            CGPoint inWin = [view convertPoint:center toView:win];
+            page = inWin;
         }
         NSDictionary *param = @{
             @"x": @(center.x), @"y": @(center.y),

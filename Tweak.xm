@@ -3131,9 +3131,38 @@ __attribute__((unused)) static void showLogPanel(void) {
 
 %new
 - (void)_taskRunLevelTapped:(UIButton *)sender {
-    // 新交互：这里只获取并展示任务，绝不自动执行。
-    appendLogView(@"🔄 获取任务列表：只获取和展示，不会自动执行");
-    refreshTaskListUI();
+    // v1.7.3: 实时获取——自动开抓包+打开等级页(额外活跃tab)，等新 0x9172 后自动刷新
+    //         显示额外活跃天数组全部任务（付费/已完成/不能做的都显示，不过滤）
+    appendLogView(@"🔄 实时获取：自动开抓包+打开等级页，等待最新任务…");
+    if (!_dumpAllRequests) {
+        _dumpAllRequests = YES;
+        appendLogView(@"[iOS抓取] ⏺ 已自动开抓包");
+    }
+    double oldTs = qqfbStatusCapturedAt();
+    // 打开等级页（tab=6 额外活跃，0x9172 在此 tab 下触发）
+    NSString *pageUrl = @"https://ti.qq.com/qqlevel/index?_wv=3&_wwv=1&tab=6&source=15";
+    NSData *bd = [pageUrl dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *b64 = [bd base64EncodedStringWithOptions:0];
+    NSString *deep = [NSString stringWithFormat:@"mqqapi://forward/url?src_type=web&version=1&url_prefix=%@", b64];
+    NSURL *u = [NSURL URLWithString:deep];
+    if (!u || ![[UIApplication sharedApplication] canOpenURL:u]) {
+        appendLogView(@"[iOS抓取] 无法拉起等级页深链");
+        return;
+    }
+    [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+    appendLogView(@"[iOS抓取] 等级页已打开，等待 0x9172 响应…");
+    // 后台等新数据（最长 20 秒），抓到后自动刷新面板
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        BOOL got = qqfbWaitStatusRefresh(oldTs, 20);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (got) {
+                refreshTaskListUI();
+                appendLogView(@"✅ 已获取最新额外活跃任务（全部显示，含付费/已完成）");
+            } else {
+                appendLogView(@"⚠️ 20秒内未抓到新 0x9172：可再点一次「🔄获取」（等级页需加载到额外活跃tab）");
+            }
+        });
+    });
 }
 
 %new

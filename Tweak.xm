@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.1"
+#define kQQFloatBallVersion @"1.8.2"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3519,6 +3519,34 @@ static void autoTapAllWebViews(void) {
 //  纯动态调用 + 主线程，无 swizzle，加载零风险
 // ══════════════════════════════════════════
 
+// ── 读取手势 target/action（v1.8.2 修复）──
+// UIGestureRecognizerTarget 的 _target/_action 是 ivar 不是 KVC 属性，
+// valueForKey:@"_target" 必抛 valueForUndefinedKey 异常（v1.8.1 实测刷屏），
+// 必须用 object_getIvar + class_getInstanceVariable 读取。
+static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
+    @try {
+        id targets = [g valueForKey:@"_targets"];
+        if (![targets isKindOfClass:[NSArray class]] || [(NSArray *)targets count] == 0) return NO;
+        id tgt = [(NSArray *)targets firstObject];
+        if (!tgt) return NO;
+        Ivar targetIvar = class_getInstanceVariable([tgt class], "_target");
+        Ivar actionIvar = class_getInstanceVariable([tgt class], "_action");
+        if (!targetIvar || !actionIvar) return NO;
+        id obj = object_getIvar(tgt, targetIvar);
+        SEL action = (SEL)object_getIvar(tgt, actionIvar);
+        if (!obj || !action) return NO;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [obj performSelector:action withObject:g];
+#pragma clang diagnostic pop
+        qqlog(@"[autotap] %@: %@", logTag, [obj description]);
+        return YES;
+    } @catch (NSException *e) {
+        qqlog(@"[autotap] 手势触发异常(%@): %@", logTag, e);
+        return NO;
+    }
+}
+
 // ── 递归收集可点击的原生按钮 + 可输入文本框 ──
 static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NSMutableArray *textViews) {
     if (!view) return;
@@ -3637,22 +3665,8 @@ static void autoTapNativeUI(void) {
                                 UIView *gv = (UIView *)btn;
                                 for (UIGestureRecognizer *g in gv.gestureRecognizers) {
                                     if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
-                                        id target = [g valueForKey:@"_targets"]; // NSArray of UIGestureRecognizerTarget
-                                        @try {
-                                        id tgt = [(NSArray *)target firstObject];
-                                        id obj = [tgt valueForKey:@"_target"];
-                                        NSValue *actVal = [tgt valueForKey:@"_action"];
-                                        SEL action = (SEL)actVal.pointerValue;
-                                        if (obj && action) {
-                                        #pragma clang diagnostic push
-                                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                            [obj performSelector:action withObject:g];
-                                        #pragma clang diagnostic pop
-                                            qqlog(@"[autotap] 手势点击: %@", t);
+                                        if (qqfbGestureInvoke(g, @"手势点击")) {
                                             clicked = YES;
-                                        }
-                                        } @catch (NSException *e) {
-                                            qqlog(@"[autotap] 手势触发异常: %@", e);
                                         }
                                         if (clicked) break;
                                     }
@@ -3688,21 +3702,11 @@ static void autoTapNativeUI(void) {
                     @try {
                         for (UIGestureRecognizer *g in gv.gestureRecognizers) {
                             if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
-                                id target = [g valueForKey:@"_targets"];
-                                id tgt = [(NSArray *)target firstObject];
-                                id obj = [tgt valueForKey:@"_target"];
-                                NSValue *actVal = [tgt valueForKey:@"_action"];
-                                SEL action = (SEL)actVal.pointerValue;
-                                if (obj && action) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                    [obj performSelector:action withObject:g];
-#pragma clang diagnostic pop
-                                    qqlog(@"[autotap] 手势兜底点击: %@", item[@"title"]);
+                                if (qqfbGestureInvoke(g, @"手势兜底点击")) {
                                     clicked = YES;
                                 }
+                                if (clicked) break;
                             }
-                            if (clicked) break;
                         }
                     } @catch (NSException *e) {
                         qqlog(@"[autotap] 手势兜底异常: %@", e);

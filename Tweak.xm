@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.7.5"
+#define kQQFloatBallVersion @"1.7.6"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1912,20 +1912,29 @@ static void runAutoTasks(void) {
             }
 
             // ══ ② 拉任务列表 ══
+            // v1.7.5: 数据源优先级改为 0x9172 全量任务（iOS 等级页真全量，含额外活跃全部任务）
+            //         旧代码用 fetchTaskList 在线拉取——iOS 上 levelTask/Get 有 is_ios_review_hide
+            //         审核过滤只回 10 个基础任务，导致「一键任务只有3个」bug
             int retCode = 0;
-            NSArray *taskList = fetchTaskList(uin, tiPskey, &retCode);
+            NSArray *taskList = qqfbReadExtraOnlyTasks();
             BOOL useBuiltIn = NO;
-            if (!taskList || taskList.count == 0) {
-                qqlog(@"[auto] ✗ 在线任务列表为空 (ret=%d)，回退内置免费任务清单", retCode);
-                taskList = builtInTasks();
-                useBuiltIn = YES;
-            } else if (taskList.count < 3) {
-                qqlog(@"[auto] ⚠ 在线任务仅 %lu 条，过少，回退内置免费任务清单", (unsigned long)taskList.count);
-                taskList = builtInTasks();
-                useBuiltIn = YES;
+            if (taskList && taskList.count > 0) {
+                qqlog(@"[auto] 使用 0x9172 全量额外活跃任务 %lu 个", (unsigned long)taskList.count);
+            } else {
+                qqlog(@"[auto] 0x9172 无数据，回退在线拉取…");
+                taskList = fetchTaskList(uin, tiPskey, &retCode);
+                if (!taskList || taskList.count == 0) {
+                    qqlog(@"[auto] ✗ 在线任务列表为空 (ret=%d)，回退内置免费任务清单", retCode);
+                    taskList = builtInTasks();
+                    useBuiltIn = YES;
+                } else if (taskList.count < 3) {
+                    qqlog(@"[auto] ⚠ 在线任务仅 %lu 条，过少，回退内置免费任务清单", (unsigned long)taskList.count);
+                    taskList = builtInTasks();
+                    useBuiltIn = YES;
+                }
             }
             if (useBuiltIn) {
-                qqlog(@"[auto] 使用内置清单 %lu 条（iOS 在线接口拿不到，方案A兜底）", (unsigned long)taskList.count);
+                qqlog(@"[auto] 使用内置清单 %lu 条（0x9172 与在线接口都拿不到，兜底）", (unsigned long)taskList.count);
             }
 
             // ══ ③ 分类：未做且能做的任务（按原始顺序）══
@@ -1937,14 +1946,14 @@ static void runAutoTasks(void) {
                 NSNumber *statusNum = task[@"status"];
                 int status = statusNum ? [statusNum intValue] : -1;
                 NSString *buttonText = task[@"button_text"] ?: @"";
-                NSString *extendStr = task[@"extend"] ?: @"";
-                NSString *jump = task[@"jump_schema"] ?: @"";
+                // v1.7.5: 0x9172 数据无 button_text/extend 字段；付费判定改用 qqfbIsPaidTaskTitle(title)
+                //         （旧 isBlocked 的 extendStr is_ios_review_hide 会把 iOS 全部可做任务误杀；
+                //           旧 buttonText 含「会员」会把「会员福利社」误杀）
+                NSString *jump = task[@"jumpURL"] ?: task[@"jump_schema"] ?: @"";
 
-                BOOL isBlocked = NO;
+                BOOL isBlocked = qqfbIsPaidTaskTitle(title);
                 if ([buttonText containsString:@"开通"] || [buttonText containsString:@"充值"] ||
-                    [buttonText containsString:@"购买"] || [buttonText containsString:@"升级"] ||
-                    [buttonText containsString:@"会员"] || [buttonText containsString:@"需"] ||
-                    [extendStr containsString:@"is_ios_review_hide"] || [extendStr containsString:@"\"hide\":true"]) {
+                    [buttonText containsString:@"购买"] || [buttonText containsString:@"买断"]) {
                     isBlocked = YES;
                 }
 
@@ -1994,6 +2003,14 @@ static void runAutoTasks(void) {
                 }
                 if (httpDone) { execDone++; continue; }
 
+                // v1.7.5: 跳转前先回等级页（干净环境），避免 QQ 复用上次手动测试留下的旧页面
+                //（实测盲盒签跳到 daily-check-in/result 结果页=旧页面残留→无按钮可点→模拟点击无效）
+                qqlog(@"[auto] 先回等级页，准备跳转任务页…");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    openLevelPage();
+                });
+                [NSThread sleepForTimeInterval:3];
+
                 qqlog(@"[auto] 跳转任务页 + 注入自动点击…");
                 dispatch_async(dispatch_get_main_queue(), ^{
                     openJumpSchema(jump);
@@ -2007,22 +2024,29 @@ static void runAutoTasks(void) {
                 }
                 [NSThread sleepForTimeInterval:4];
 
-                // 重新拉列表验证该任务是否完成
-                NSArray *freshList = fetchTaskList(uin, tiPskey, NULL);
-                int st = findTaskStatusByTitle(freshList ?: taskList, title);
+                // 重新验证该任务是否完成：回等级页触发新 0x9172 → 按 title 找 status
+                // v1.7.5: 旧代码用 fetchTaskList 在线拉取验证（iOS 只回 10 个基础任务，
+                //         额外活跃任务找不到 → 全部误报未完成），改用 0x9172 全量验证
+                double t0 = qqfbStatusCapturedAt();
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    openLevelPage();
+                });
+                BOOL got = qqfbWaitStatusRefresh(t0, 20);
+                int st = -1;
+                if (got) {
+                    NSArray *freshList = qqfbReadExtraOnlyTasks();
+                    st = qqfbFindTaskStatusIn(freshList ?: @[], @"", title);
+                }
                 if (st >= 1) {
                     execDone++;
                     qqlog(@"[auto] ✅ 完成: %@ (status=%d)", title, st);
                 } else {
                     execSkip++;
-                    qqlog(@"[auto] ⏭ 未完成: %@ (status=%d，可能需更多操作，稍后可在等级页手动处理)", title, st);
+                    qqlog(@"[auto] ⏭ 未完成: %@ (status=%d%@，可能需更多操作，稍后可在等级页手动处理)",
+                          title, st, got ? @"" : @"，重抓超时");
                 }
-                // v1.7.4: 每个任务做完回等级页，避免旧任务页面残留导致 autotap 注入错误页面
-                //（实测：盲盒签任务跳转后 autotap 还在注入上一个签到页，页面堆积死循环）
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    openLevelPage();
-                });
-                [NSThread sleepForTimeInterval:2];
+                // 上面验证已回等级页触发新 0x9172（也兼作「每个任务做完回等级页」，
+                // 避免旧任务页面残留导致 autotap 注入错误页面）
             }
 
             // ══ ⑤ 汇总 + 回到等级页 ══
@@ -3227,6 +3251,12 @@ static void autoTapWebView(id webView) {
             url = @"";
         }
         qqlog(@"[autotap] 注入页面: %@", url.length > 100 ? [url substringToIndex:100] : url);
+        // v1.7.5: URL 为空的容器（Kuikly 原生壳/未加载完）注入无效，跳过——等页面真正加载出来
+        //（实测：盲盒签 result 页注入全返回空，其中一部分是空 URL 的 Kuikly 容器）
+        if (url.length == 0) {
+            qqlog(@"[autotap] 页面 URL 为空（容器/加载中），跳过本轮注入");
+            return;
+        }
         NSString *js =
         @"(function(){"
         "  var kws=['签到','立即签到','一键签到','打卡','立即打卡','领取','立即领取','去完成','发布','发表','确定','同意','完成','去打卡','领福利'];"

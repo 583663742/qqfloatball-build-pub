@@ -759,6 +759,10 @@ static int qqfbParse9172AndSave(NSData *pbBody) {
         }
         [json writeToFile:qqtaskStatusPath() atomically:YES];
         qqlog(@"[9172-PARSE] 已解析 %lu 个任务 → %@", (unsigned long)tasks.count, qqtaskStatusPath());
+        // v1.7.2: 解析成功 → 自动刷新面板缓存（不用手动点「🔄获取」才看到最新状态）
+        dispatch_async(dispatch_get_main_queue(), ^{
+            refreshTaskListUI();
+        });
         return (int)tasks.count;
     } @catch (NSException *e) {
         qqlog(@"[9172-PARSE] 异常 %@", e);
@@ -1591,6 +1595,7 @@ static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
+static void refreshTaskListUI(void);        // v1.7.2: qqfbParse9172AndSave(730行) 先于定义(2521行)调用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
 
 // ══════════════════════════════════════════

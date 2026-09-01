@@ -7,6 +7,12 @@
 
 // ─────────────────────────────────────────────
 // QQFloatBall 浮球
+// v1.7.1 (2026-09-02):
+//   · 0x9172 任务按服务端分组解析：field4.field3=付费加倍(pay,6个) field4.field4=日常活跃(daily,2个) field4.field5=额外活跃天数(extra,26个)
+//   · 任务 JSON 每项带 group 标记；顶层 groups 统计 + dataUin（0x9172 响应体真实账号，可核对旧数据）
+//   · 面板/闭环/自动任务/勾选执行全部只取 extra 组（用户需求：付费加倍与日常活跃不要）
+//   · taskId 兼容 field20（extra 组用，实锤 24/23/1010..）与 field6（pay 组用，实锤 801-806）
+//   · 0x9172 数据实锤来源：真机 KUILKY-PB-RSP hex 离线解析（2026-09-01 日志）
 // v1.7.0 (2026-09-02):
 //   · 修复 getCurrentUin 账号误判：捕获客户端请求 Cookie 里的真实 uin（_capturedCurrentUin），
 //     优先返回真实登录账号。此前靠「哪个号有 ti 域 p_skey」猜账号，820284286 旧缓存
@@ -646,6 +652,139 @@ static void pbScanTasks(const uint8_t *b, NSUInteger len, NSMutableArray *outTas
     }
 }
 
+// 解析单个任务节点（field4 分组内 field1 的直接子消息）
+// 字段映射（真机 0x9172 hex 离线实锤，2026-09-01）：
+//   f1=title  f2=desc  f3=iconURL  f4=按钮文案  f5=jumpURL
+//   taskId: 付费组(分组A)用 f6=801..；额外活跃组(分组C)用 f20=24/23…；两者都试
+//   status 由按钮文案推导：已完成/已领取/已打卡=1；已结束=2；其它=0
+static NSDictionary *pbParseTaskNode(const uint8_t *b, NSUInteger len) {
+    NSMutableDictionary *fs = [NSMutableDictionary dictionary];
+    NSUInteger i = 0;
+    while (i < len) {
+        uint64_t tag;
+        if (!pbReadVarint(b, len, &i, &tag)) break;
+        uint64_t field = tag >> 3; int wtype = (int)(tag & 7);
+        if (wtype == 0) {
+            uint64_t v;
+            if (!pbReadVarint(b, len, &i, &v)) break;
+            if (!fs[@(field)]) fs[@(field)] = @{@"t": @"v", @"v": @(v)};
+        } else if (wtype == 2) {
+            uint64_t ln;
+            if (!pbReadVarint(b, len, &i, &ln)) break;
+            if (i + (NSUInteger)ln > len) break;
+            NSString *s = pbTryUTF8(b, i, (NSUInteger)ln);
+            if (s) {
+                if (!fs[@(field)]) fs[@(field)] = @{@"t": @"s", @"s": s};
+            }
+            i += (NSUInteger)ln;
+        } else if (wtype == 5) { i += 4; }
+        else if (wtype == 1) { i += 8; }
+        else break;
+    }
+    NSDictionary *f1 = fs[@1], *f3 = fs[@3], *f4 = fs[@4];
+    if (!(f1 && [f1[@"t"] isEqualToString:@"s"] &&
+          f4 && [f4[@"t"] isEqualToString:@"s"] &&
+          f3 && [f3[@"t"] isEqualToString:@"s"] && [f3[@"s"] hasPrefix:@"http"])) return nil;
+    NSString *title = f1[@"s"];
+    NSString *btn   = f4[@"s"];
+    NSString *desc  = (fs[@2] && [fs[@2][@"t"] isEqualToString:@"s"]) ? fs[@2][@"s"] : @"";
+    NSString *jump  = (fs[@5] && [fs[@5][@"t"] isEqualToString:@"s"]) ? fs[@5][@"s"] : @"";
+    NSString *taskId = @"";
+    if (fs[@20] && [fs[@20][@"t"] isEqualToString:@"v"]) taskId = [NSString stringWithFormat:@"%@", fs[@20][@"v"]];
+    if (fs[@6] && [fs[@6][@"t"] isEqualToString:@"v"] && taskId.length == 0) taskId = [NSString stringWithFormat:@"%@", fs[@6][@"v"]];
+    int st = 0;
+    if ([btn isEqualToString:@"已完成"] || [btn isEqualToString:@"已领取"] || [btn isEqualToString:@"已打卡"]) st = 1;
+    else if ([btn isEqualToString:@"已结束"]) st = 2;
+    return @{
+        @"taskId": taskId,
+        @"title": title ?: @"",
+        @"desc": desc ?: @"",
+        @"jumpURL": jump ?: @"",
+        @"button": btn ?: @"",
+        @"status": @(st)
+    };
+}
+
+// 0x9172 分组扫描：field4 { f1=uin, f3=付费加倍组, f4=日常活跃组, f5=额外活跃天数组 }
+// 每组内的 f1 重复消息=任务节点；输出 tasks（带 group 标记）+ 分组统计
+static NSDictionary *pbScan9172Groups(const uint8_t *b, NSUInteger len, NSMutableArray *outTasks) {
+    NSMutableDictionary *counts = [NSMutableDictionary dictionary];
+    NSUInteger i = 0;
+    while (i < len) {
+        uint64_t tag;
+        if (!pbReadVarint(b, len, &i, &tag)) break;
+        uint64_t field = tag >> 3; int wtype = (int)(tag & 7);
+        if (wtype == 2) {
+            uint64_t ln;
+            if (!pbReadVarint(b, len, &i, &ln)) break;
+            if (field == 4 && i + ln <= len) {
+                const uint8_t *f4b = b + i;
+                uint64_t f4len = ln;
+                NSUInteger j = 0;
+                uint64_t uin = 0;
+                while (j < f4len) {
+                    uint64_t t2;
+                    if (!pbReadVarint(f4b, f4len, &j, &t2)) break;
+                    uint64_t f2 = t2 >> 3; int w2 = (int)(t2 & 7);
+                    if (w2 == 2) {
+                        uint64_t ln2;
+                        if (!pbReadVarint(f4b, f4len, &j, &ln2)) break;
+                        if (j + ln2 > f4len) break;
+                        if (f2 == 3 || f2 == 4 || f2 == 5) {
+                            NSString *grp = (f2 == 3) ? @"pay" : ((f2 == 4) ? @"daily" : @"extra");
+                            const uint8_t *gb = f4b + j;
+                            uint64_t glen = ln2;
+                            NSUInteger k = 0; int n = 0;
+                            while (k < glen) {
+                                uint64_t t3;
+                                if (!pbReadVarint(gb, glen, &k, &t3)) break;
+                                uint64_t f3 = t3 >> 3; int w3 = (int)(t3 & 7);
+                                if (w3 == 2) {
+                                    uint64_t ln3;
+                                    if (!pbReadVarint(gb, glen, &k, &ln3)) break;
+                                    if (k + ln3 > glen) break;
+                                    if (f3 == 1) {
+                                        NSDictionary *task = pbParseTaskNode(gb + k, (NSUInteger)ln3);
+                                        if (task) {
+                                            NSMutableDictionary *mt = [task mutableCopy];
+                                            mt[@"group"] = grp;
+                                            [outTasks addObject:mt];
+                                            n++;
+                                        }
+                                    }
+                                    k += ln3;
+                                } else if (w3 == 0) {
+                                    uint64_t v3;
+                                    if (!pbReadVarint(gb, glen, &k, &v3)) break;
+                                } else if (w3 == 5) k += 4;
+                                else if (w3 == 1) k += 8;
+                                else break;
+                            }
+                            counts[grp] = @(n);
+                        }
+                        j += ln2;
+                    } else if (w2 == 0) {
+                        uint64_t v2;
+                        if (!pbReadVarint(f4b, f4len, &j, &v2)) break;
+                        if (f2 == 1) uin = v2;
+                    } else if (w2 == 5) j += 4;
+                    else if (w2 == 1) j += 8;
+                    else break;
+                }
+                counts[@"uin"] = @(uin);
+                break;  // 已处理 field4
+            }
+            i += ln;
+        } else if (wtype == 0) {
+            uint64_t v;
+            if (!pbReadVarint(b, len, &i, &v)) break;
+        } else if (wtype == 5) i += 4;
+        else if (wtype == 1) i += 8;
+        else break;
+    }
+    return counts;
+}
+
 // 解析 0x9172 pbBody → 写 qqtask_status.json，返回任务数（失败返回 -1）
 static int qqfbParse9172AndSave(NSData *pbBody) {
     @try {
@@ -654,7 +793,7 @@ static int qqfbParse9172AndSave(NSData *pbBody) {
             return -1;
         }
         NSMutableArray *tasks = [NSMutableArray array];
-        pbScanTasks((const uint8_t *)pbBody.bytes, pbBody.length, tasks, 0);
+        NSDictionary *groupInfo = pbScan9172Groups((const uint8_t *)pbBody.bytes, pbBody.length, tasks);
         if (tasks.count == 0) {
             // 解析失败：dump 前 200 字节 hex 供排查
             qqlog(@"[9172-PARSE] 解析任务=0，原始前200B hex=%@", qqfbHex(pbBody, 200));
@@ -663,9 +802,11 @@ static int qqfbParse9172AndSave(NSData *pbBody) {
         NSDictionary *root = @{
             @"capturedAt": @([[NSDate date] timeIntervalSince1970]),
             @"cmd": @"OidbSvcTrpcTcp.0x9172_0",
-            @"uin": (_capturedCurrentUin ?: @""),   // v1.7.0: 记录任务所属账号
+            @"uin": (_capturedCurrentUin ?: @""),   // v1.7.0: 记录任务所属账号（客户端请求Cookie捕获）
+            @"dataUin": groupInfo[@"uin"] ?: @(0),  // v1.7.1: 0x9172 响应体里的真实账号（可核对是否旧数据）
             @"pbBodyLen": @(pbBody.length),
             @"taskCount": @(tasks.count),
+            @"groups": (groupInfo ?: @{}),          // v1.7.1: {pay:6,daily:2,extra:26,uin:xxx}
             @"tasks": tasks
         };
         NSError *err = nil;
@@ -2008,6 +2149,30 @@ static NSArray *qqfbReadTaskStatusList(void) {
     return nil;
 }
 
+// v1.7.1: 只返回「额外活跃天数」组的任务（用户需求：付费加倍/日常活跃不要）
+// group=extra 优先；旧 JSON 无 group 字段时退化为过滤付费标题（兼容历史数据）
+static NSArray *qqfbReadExtraOnlyTasks(void) {
+    NSArray *all = qqfbReadTaskStatusList();
+    if (!all || all.count == 0) return nil;
+    NSMutableArray *out = [NSMutableArray array];
+    BOOL hasGroupField = NO;
+    for (NSDictionary *t in all) {
+        if ([t isKindOfClass:[NSDictionary class]] && [t[@"group"] length] > 0) { hasGroupField = YES; break; }
+    }
+    for (NSDictionary *t in all) {
+        if (![t isKindOfClass:[NSDictionary class]]) continue;
+        if (hasGroupField) {
+            if ([t[@"group"] isEqualToString:@"extra"]) [out addObject:t];
+        } else {
+            NSString *title = t[@"title"] ?: @"";
+            if (qqfbIsPaidTaskTitle(title)) continue;   // 付费加倍排除
+            if ([title containsString:@"在线"]) continue; // 日常活跃排除（电脑QQ在线/手机QQ连续在线）
+            [out addObject:t];
+        }
+    }
+    return out.count > 0 ? out : nil;
+}
+
 // ── 当前 qqtask_status.json 的 capturedAt（Unix 时间戳，无文件=0）──
 static double qqfbStatusCapturedAt(void) {
     NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/qqtask_status.json"];
@@ -2115,9 +2280,9 @@ static void runClosedLoopTasks(void) {
             if (!qqfbWaitStatusRefresh(oldTs, 15)) {
                 qqlog(@"[闭环] ⚠️ 15 秒内未抓到新的 0x9172 响应（等级页可能未打开/已抓过最新数据）");
             }
-            NSArray *taskList = qqfbReadTaskStatusList();
+            NSArray *taskList = qqfbReadExtraOnlyTasks();
             if (!taskList || taskList.count == 0) {
-                qqlog(@"[闭环] ❌ 没有任务数据，请先手动打开等级页一次");
+                qqlog(@"[闭环] ❌ 没有额外活跃任务数据，请先手动打开等级页并点「额外活跃」一次");
                 return;
             }
             NSMutableArray *cand = qqfbFilterExecutableTasks(taskList);
@@ -2162,7 +2327,7 @@ static void runClosedLoopTasks(void) {
                 BOOL got = qqfbWaitStatusRefresh(t0, 20);
                 int after = -1;
                 if (got) {
-                    NSArray *newList = qqfbReadTaskStatusList();
+                    NSArray *newList = qqfbReadExtraOnlyTasks();
                     after = qqfbFindTaskStatusIn(newList ?: @[], tid, title);
                 }
                 if (after == 1) {
@@ -2217,9 +2382,9 @@ static void runAutoHttpTasks(void) {
             if (!qqfbWaitStatusRefresh(oldTs, 15)) {
                 qqlog(@"[自动任务] ⚠️ 15 秒内未抓到新 0x9172（等级页可能未打开/数据未变），继续执行但回查可能失败");
             }
-            NSArray *taskList = qqfbReadTaskStatusList();
+            NSArray *taskList = qqfbReadExtraOnlyTasks();
             if (!taskList || taskList.count == 0) {
-                qqlog(@"[自动任务] ❌ 没有任务数据，请先手动打开等级页一次");
+                qqlog(@"[自动任务] ❌ 没有额外活跃任务数据，请先手动打开等级页并点「额外活跃」一次");
                 return;
             }
             NSMutableDictionary *beforeStatus = [NSMutableDictionary dictionary];
@@ -2256,7 +2421,7 @@ static void runAutoHttpTasks(void) {
             BOOL got = qqfbWaitStatusRefresh(t0, 20);
             int pushedN = 0;
             if (got) {
-                NSArray *newList = qqfbReadTaskStatusList();
+                NSArray *newList = qqfbReadExtraOnlyTasks();
                 for (NSString *tid in beforeStatus) {
                     int before = [beforeStatus[tid][@"status"] intValue];
                     int after = qqfbFindTaskStatusIn(newList ?: @[], tid, beforeStatus[tid][@"title"]);
@@ -2411,11 +2576,11 @@ static void refreshTaskListUI(void) {
     // v1.4.9: 数据源优先级改为 0x9172 全量任务（iOS 等级页真全量 26+ 条，qqtask_status.json）
     //          → 客户端 levelTask/Get 捕获（iOS 只回 10 个，安卓才全量） → 在线拉取
     // iOS 上 levelTask/Get 有 is_ios_review_hide 审核过滤只给 10 条，必须用 0x9172 PB 的 taskId/jumpURL/status
-    NSArray *statusTasks = qqfbReadTaskStatusList();
+    NSArray *statusTasks = qqfbReadExtraOnlyTasks();
     if (statusTasks && statusTasks.count > 0) {
         _taskListCache = statusTasks;
         if (!_checkedTaskIds) _checkedTaskIds = [NSMutableSet set];
-        appendLogView([NSString stringWithFormat:@"✅ 使用 0x9172 全量任务 %lu 个", (unsigned long)statusTasks.count]);
+        appendLogView([NSString stringWithFormat:@"✅ 使用 0x9172 额外活跃任务 %lu 个", (unsigned long)statusTasks.count]);
         renderTaskRows();
         return;
     }

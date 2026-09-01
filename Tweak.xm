@@ -3533,7 +3533,10 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
         Ivar actionIvar = class_getInstanceVariable([tgt class], "_action");
         if (!targetIvar || !actionIvar) return NO;
         id obj = object_getIvar(tgt, targetIvar);
-        SEL action = (SEL)object_getIvar(tgt, actionIvar);
+        // ARC 禁 (SEL) 指针转换：_action ivar 实为指针，memcpy 取出
+        SEL action = NULL;
+        void *actionPtr = (__bridge void *)object_getIvar(tgt, actionIvar);
+        memcpy(&action, &actionPtr, sizeof(action));
         if (!obj || !action) return NO;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"

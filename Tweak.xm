@@ -593,65 +593,6 @@ static NSString *pbTryUTF8(const uint8_t *b, NSUInteger off, NSUInteger n) {
     return nil;
 }
 
-// 递归遍历 protobuf message，命中任务节点(title+http图标+按钮文案)则收集
-static void pbScanTasks(const uint8_t *b, NSUInteger len, NSMutableArray *outTasks, int depth) {
-    if (depth > 8 || len == 0) return;   // 防深递归
-    NSMutableDictionary *fs = [NSMutableDictionary dictionary];
-    NSMutableArray *subMsgs = [NSMutableArray array];   // 嵌套子消息 [off,len]
-    NSUInteger i = 0;
-    while (i < len) {
-        uint64_t tag;
-        if (!pbReadVarint(b, len, &i, &tag)) break;
-        uint64_t field = tag >> 3; int wtype = (int)(tag & 7);
-        if (wtype == 0) {
-            uint64_t v;
-            if (!pbReadVarint(b, len, &i, &v)) break;
-            if (!fs[@(field)]) fs[@(field)] = @{@"t": @"v", @"v": @(v)};
-        } else if (wtype == 2) {
-            uint64_t ln;
-            if (!pbReadVarint(b, len, &i, &ln)) break;
-            if (i + (NSUInteger)ln > len) break;   // 越界保护
-            NSString *s = pbTryUTF8(b, i, (NSUInteger)ln);
-            if (s) {
-                if (!fs[@(field)]) fs[@(field)] = @{@"t": @"s", @"s": s};
-            } else if (ln > 1) {
-                [subMsgs addObject:@[@(i), @(ln)]];
-            }
-            i += (NSUInteger)ln;
-        } else if (wtype == 5) { i += 4; }
-        else if (wtype == 1) { i += 8; }
-        else break;
-    }
-    // 任务节点判定：field1(title,str) + field3(iconURL,http) + field4(按钮文案,str)
-    NSDictionary *f1 = fs[@1], *f3 = fs[@3], *f4 = fs[@4];
-    if (f1 && [f1[@"t"] isEqualToString:@"s"] &&
-        f4 && [f4[@"t"] isEqualToString:@"s"] &&
-        f3 && [f3[@"t"] isEqualToString:@"s"] && [f3[@"s"] hasPrefix:@"http"]) {
-        NSString *title = f1[@"s"];
-        NSString *btn   = f4[@"s"];
-        NSString *desc  = (fs[@2] && [fs[@2][@"t"] isEqualToString:@"s"]) ? fs[@2][@"s"] : @"";
-        NSString *jump  = (fs[@5] && [fs[@5][@"t"] isEqualToString:@"s"]) ? fs[@5][@"s"] : @"";
-        NSString *taskId = @"";
-        if (fs[@20] && [fs[@20][@"t"] isEqualToString:@"v"]) taskId = [NSString stringWithFormat:@"%@", fs[@20][@"v"]];
-        int st = 0;
-        if ([btn isEqualToString:@"已完成"] || [btn isEqualToString:@"已领取"] || [btn isEqualToString:@"已打卡"]) st = 1;
-        else if ([btn isEqualToString:@"已结束"]) st = 2;
-        [outTasks addObject:@{
-            @"taskId": taskId,
-            @"title": title ?: @"",
-            @"desc": desc ?: @"",
-            @"jumpURL": jump ?: @"",
-            @"button": btn ?: @"",
-            @"status": @(st)
-        }];
-    }
-    for (NSArray *pair in subMsgs) {
-        NSUInteger off = [pair[0] unsignedIntegerValue];
-        NSUInteger n = [pair[1] unsignedIntegerValue];
-        pbScanTasks(b + off, n, outTasks, depth + 1);
-    }
-}
-
 // 解析单个任务节点（field4 分组内 field1 的直接子消息）
 // 字段映射（真机 0x9172 hex 离线实锤，2026-09-01）：
 //   f1=title  f2=desc  f3=iconURL  f4=按钮文案  f5=jumpURL

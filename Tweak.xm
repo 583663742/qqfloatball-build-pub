@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.3"
+#define kQQFloatBallVersion @"1.8.4"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -2136,14 +2136,16 @@ static void runAutoTasks(void) {
                             openJumpSchema(jump);
                         });
                         // v1.8.3 视频任务（用户实测「老乱点广告」）：进页面后**不点任何东西**，
-                        // 等右上角广告计时器结束，然后点右上角 X 关闭。日志实锤：旧逻辑每轮
-                        // autoTapNativeUI 点到了全屏 KRView(0 0; 430 932)=乱点广告。
+                        // 等右上角广告计时器结束（服务端要求 32 秒停留），然后点右上角 X 关闭。
+                        // 日志实锤：旧逻辑每轮 autoTapNativeUI 点到了全屏 KRView(0 0; 430 932)=乱点广告。
+                        // v1.8.4 修复：rounds=1 只等 5 秒就关闭=停留不足服务端要求→任务永不完成→
+                        // 每任务 3 重试×11 任务=疯狂重复跳等级页。必须等满 staySec。
                         BOOL isVideoTask = [title containsString:@"视频"];
                         // v1.7.8: 停留型任务期间每轮做「原生 UI 点击」——Kuikly 任务页不是
                         // WKWebView（JS 注入永远找不到，纯刷屏日志），但原生按钮（看广告/
                         // 进入游戏/开始阅读等）可点；「未找到 WKWebView」只在第一轮打一次
                         BOOL wvLogged = NO;
-                        int rounds = isVideoTask ? 1 : (staySec / 5 + 1);
+                        int rounds = isVideoTask ? (staySec / 5) : (staySec / 5 + 1);
                         for (int round = 0; round < rounds; round++) {
                             [NSThread sleepForTimeInterval:5];
                             if (!isVideoTask) {
@@ -3563,6 +3565,15 @@ static void autoTapAllWebViews(void) {
 // 必须用 object_getIvar + class_getInstanceVariable 读取。
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
     @try {
+        // v1.8.4（用户「随便点一本书就行了」）：过滤文本交互手势——
+        // UITextNonEditableInteraction 继承自 UITapGestureRecognizer，会被 isKindOfClass
+        // 误判为 tap。日志实锤：小说书城兜底点击点中 <UITextNonEditableInteraction>
+        // (6,390 318x84)（书城顶部文本条），触发它=白点不点书。
+        // 凡类名含 UIText / TextInteraction 的一律跳过，只点真正的点击手势。
+        NSString *gcls = NSStringFromClass([g class]);
+        if ([gcls containsString:@"UIText"] || [gcls containsString:@"TextInteraction"]) {
+            return NO;
+        }
         id targets = [g valueForKey:@"_targets"];
         if (![targets isKindOfClass:[NSArray class]] || [(NSArray *)targets count] == 0) return NO;
         id tgt = [(NSArray *)targets firstObject];
@@ -3620,6 +3631,12 @@ static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NS
     if (![view isKindOfClass:[UIControl class]] && view.gestureRecognizers.count > 0 && !view.hidden && view.alpha > 0.1) {
         BOOL hasTap = NO;
         for (UIGestureRecognizer *g in view.gestureRecognizers) {
+            // v1.8.4: 过滤 UIText* 文本交互手势（UITextNonEditableInteraction 继承
+            // UITapGestureRecognizer 会被误判为 tap，但触发它=文本菜单不是点击）
+            NSString *gcls = NSStringFromClass([g class]);
+            if ([gcls containsString:@"UIText"] || [gcls containsString:@"TextInteraction"]) {
+                continue;
+            }
             if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
                 hasTap = YES;
                 break;

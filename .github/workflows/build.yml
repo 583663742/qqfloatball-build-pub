@@ -53,6 +53,20 @@ jobs:
           ls -la packages/ || true
           find . -name "*.deb" -not -path "./layout/*" | head -5
 
+      - name: Rename dylib with version
+        run: |
+          # 从 Tweak.xm 提取 kQQFloatBallVersion（如 "1.7.3"），产物名带版本号
+          # 避免 TrollFools 里同名文件变成 "QQFloatBall (5).dylib" 乱名，用户无法分辨版本
+          VER=$(grep -o 'kQQFloatBallVersion @"[^"]*"' Tweak.xm | head -1 | sed 's/.*@"\(.*\)"/\1/')
+          [ -z "$VER" ] && VER="unknown"
+          echo "version: $VER"
+          for f in .theos/obj/QQFloatBall.dylib .theos/obj/debug/QQFloatBall.dylib; do
+            if [ -f "$f" ]; then
+              cp "$f" "$(dirname "$f")/QQFloatBall_v${VER}.dylib"
+              echo "renamed: $(dirname "$f")/QQFloatBall_v${VER}.dylib"
+            fi
+          done
+
       - name: Upload deb plus dylib
         uses: actions/upload-artifact@v4
         with:

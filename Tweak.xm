@@ -1679,6 +1679,7 @@ static int findTaskStatusByTitle(NSArray *taskList, NSString *title) {
 static void autoTapAllWebViews(void);
 static void collectWebViewsInView(UIView *view, NSMutableArray *outArr);
 static void autoTapNativeUI(void);
+static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NSMutableArray *textViews);
 static void qqfbTapCloseButton(void);
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
 static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag);

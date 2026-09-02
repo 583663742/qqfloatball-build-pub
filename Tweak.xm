@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.1"
+#define kQQFloatBallVersion @"1.9.2"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3667,14 +3667,17 @@ static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
         Class touchCls = NSClassFromString(@"UITouch");
         if (!touchCls) return NO;
         id touch = [[touchCls alloc] init];
-        // 私有 ivar 逐个 KVC 设置（有 @try 保护, 个别 iOS 版本 ivar 名差异不致命）
-        [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
-        [touch setValue:@(1) forKey:@"_tapCount"];
-        [touch setValue:window forKey:@"_window"];
-        [touch setValue:view forKey:@"_view"];
-        [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"_locationInWindow"];
-        [touch setValue:[NSNumber numberWithDouble:[[NSProcessInfo processInfo] systemUptime]]
-                 forKey:@"_timestamp"];
+        // ★ v1.9.2 关键修复: 私有 ivar 每个**单独套 @try**!
+        //   实锤: 当前 iOS 的 UITouch **没有 _view ivar**, 直接 [touch setValue:view forKey:@"_view"]
+        //   抛 setValue:forUndefinedKey: not key value coding-compliant for key _view,
+        //   导致整个 @try 中断 → 后面的 [view touchesBegan...](真正让触摸生效的一步)永远不执行 → 点书失败!
+        //   现在每个 ivar 崩了都跳过, 确保 [view touchesBegan] 一定能跑到。
+        @try { [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"]; } @catch (NSException *e) {}
+        @try { [touch setValue:@(1) forKey:@"_tapCount"]; } @catch (NSException *e) {}
+        @try { [touch setValue:window forKey:@"_window"]; } @catch (NSException *e) {}
+        @try { [touch setValue:view forKey:@"_view"]; } @catch (NSException *e) {}
+        @try { [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
+        @try { [touch setValue:[NSNumber numberWithDouble:[[NSProcessInfo processInfo] systemUptime]] forKey:@"_timestamp"]; } @catch (NSException *e) {}
         // UITouchesEvent 私有类 + _addTouch:forDelayedDelivery: 构造事件
         Class evCls = NSClassFromString(@"UITouchesEvent");
         id event = [[evCls alloc] init];
@@ -3687,8 +3690,9 @@ static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
         }
         NSSet *touchSet = [NSSet setWithObject:touch];
         // 完整触摸序列: began -> ended（Kuikly 需要 touchDown 先于 touchUp）
+        // 触摸直接发给 view——即使上面 ivar 全失败, 这里仍能让 Kuikly 响应。
         [view touchesBegan:touchSet withEvent:event];
-        [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
+        @try { [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"]; } @catch (NSException *e) {}
         [view touchesEnded:touchSet withEvent:event];
         qqlog(@"[autotap] %@: %@ 模拟触摸(%.0f,%.0f)", logTag,
               NSStringFromClass([view class]), center.x, center.y);
@@ -3722,18 +3726,27 @@ static BOOL qqfbTapNovelBookCard(void) {
             for (NSDictionary *item in buttons) {
                 UIView *v = item[@"btn"];
                 if (!v || v.hidden || v.alpha <= 0.1) continue;
+                // ★ v1.9.2 铁律: 排除所有「文本输入/文本交互」相关视图!
+                //   实锤: 之前把 UITextView(318x84) 和 _UITextMe...(UITextInteraction)
+                //   当成书卡片点 → 点不中书还弹出文本菜单/误触。书卡片绝不是文本视图。
+                NSString *cls = NSStringFromClass([v class]);
+                if ([cls containsString:@"UIText"] || [cls containsString:@"TextInteraction"]) continue;
+                // 排除纯 UIControl(UIButton 等)——书卡片是 Kuikly 手势/css_click 组件
+                if ([v isKindOfClass:[UIControl class]]) continue;
                 CGRect f = v.frame;
                 CGFloat x = f.origin.x, y = f.origin.y;
+                CGFloat w = f.size.width, h = f.size.height;
                 // 排除顶部导航区（返回/搜索/分类 tab 都在那）
                 if (y < 150) continue;
                 // 排除右上角操作区
                 if (x > scr.width - 80) continue;
-                // 只收大卡片（书封面/「猜你喜欢」的竖版书卡，宽高都够大）
-                if (f.size.width < 90 || f.size.height < 80) continue;
+                // 只收「竖版书封卡片」(猜你喜欢): 高度明显大于宽度, 中等尺寸。
+                //   宽 80~200, 高 110~280, 且 高 >= 宽*1.15 (竖版封面)
+                //   排除 318x84 这种横长条(那是文本/空白区域), 排除 116x154 这种小入口。
+                if (w < 80 || w > 200) continue;
+                if (h < 110 || h > 280) continue;
+                if (h < w * 1.15) continue;
                 // 优先 Kuikly 组件（css_click/css_touchUp/手势），排除纯文本链接
-                // ★ v1.9.1 修复: kuiklyClick/kuiklyTouch 是 block(不是NSNumber)!
-                //   对 block 调 boolValue 会抛 unrecognized selector(实锤日志
-                //   "-[__NSMallocBlock__ boolValue]") → 点书失败。改为判断是否为 nil。
                 id kClick = item[@"kuiklyClick"];
                 id kTouch = item[@"kuiklyTouch"];
                 BOOL kuikly = (kClick != nil) || (kTouch != nil) || [item[@"gesture"] boolValue];
@@ -3814,12 +3827,15 @@ static BOOL qqfbSwipeRightToFlip(void) {
             if (!touchCls) return;
             id touch = [[touchCls alloc] init];
             double t0 = [[NSProcessInfo processInfo] systemUptime];
-            [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
-            [touch setValue:@(1) forKey:@"_tapCount"];
-            [touch setValue:win forKey:@"_window"];
-            [touch setValue:target forKey:@"_view"];
-            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(startX, y)] forKey:@"_locationInWindow"];
-            [touch setValue:[NSNumber numberWithDouble:t0] forKey:@"_timestamp"];
+            // ★ v1.9.2: 每个 KVC ivar **单独 @try**(当前 iOS UITouch 没有 _view/_window ivar,
+            //   直接 setValue 抛 not key value coding-compliant 中断流程)。崩了照样继续,
+            //   确保下方 [target touchesBegan...] 触摸序列一定能执行(真正翻页的一步)。
+            @try { [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"]; } @catch (NSException *e) {}
+            @try { [touch setValue:@(1) forKey:@"_tapCount"]; } @catch (NSException *e) {}
+            @try { [touch setValue:win forKey:@"_window"]; } @catch (NSException *e) {}
+            @try { [touch setValue:target forKey:@"_view"]; } @catch (NSException *e) {}
+            @try { [touch setValue:[NSValue valueWithCGPoint:CGPointMake(startX, y)] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
+            @try { [touch setValue:[NSNumber numberWithDouble:t0] forKey:@"_timestamp"]; } @catch (NSException *e) {}
             Class evCls = NSClassFromString(@"UITouchesEvent");
             id event = [[evCls alloc] init];
             SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
@@ -3834,14 +3850,14 @@ static BOOL qqfbSwipeRightToFlip(void) {
             // 分 6 步移动, 用 _timestamp 递增模拟滑动时间(不真实 sleep, 不阻塞主线程)
             for (int i = 1; i <= 6; i++) {
                 CGFloat fx = startX - (startX - endX) * i / 6.0;
-                [touch setValue:@(UITouchPhaseMoved) forKey:@"_phase"];
-                [touch setValue:[NSValue valueWithCGPoint:CGPointMake(fx, y)] forKey:@"_locationInWindow"];
-                [touch setValue:[NSNumber numberWithDouble:t0 + i * 0.02] forKey:@"_timestamp"];
+                @try { [touch setValue:@(UITouchPhaseMoved) forKey:@"_phase"]; } @catch (NSException *e) {}
+                @try { [touch setValue:[NSValue valueWithCGPoint:CGPointMake(fx, y)] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
+                @try { [touch setValue:[NSNumber numberWithDouble:t0 + i * 0.02] forKey:@"_timestamp"]; } @catch (NSException *e) {}
                 [target touchesMoved:touchSet withEvent:event];
             }
-            [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
-            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(endX, y)] forKey:@"_locationInWindow"];
-            [touch setValue:[NSNumber numberWithDouble:t0 + 0.15] forKey:@"_timestamp"];
+            @try { [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"]; } @catch (NSException *e) {}
+            @try { [touch setValue:[NSValue valueWithCGPoint:CGPointMake(endX, y)] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
+            @try { [touch setValue:[NSNumber numberWithDouble:t0 + 0.15] forKey:@"_timestamp"]; } @catch (NSException *e) {}
             [target touchesEnded:touchSet withEvent:event];
             qqlog(@"[小说] 右滑翻页完成(触发视图:%@)", NSStringFromClass([target class]));
             done = YES;

@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.3"
+#define kQQFloatBallVersion @"1.9.4"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3806,10 +3806,13 @@ static BOOL qqfbTapNovelBookCard(void) {
             if (!done) {
                 CGSize scrSize = [UIScreen mainScreen].bounds.size;
                 NSArray *pts = @[
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.30, scrSize.height * 0.70)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.30, scrSize.height * 0.75)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.65)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.30, scrSize.height * 0.80)],
+                    // 左边第一本书(竖版书封) + 右边第二本, 覆盖不同高度(书名/封面/简介区)
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.62)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.68)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.74)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.72, scrSize.height * 0.68)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.72, scrSize.height * 0.74)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.80)],
                 ];
                 for (NSValue *pv in pts) {
                     CGPoint p = [pv CGPointValue];
@@ -3818,14 +3821,31 @@ static BOOL qqfbTapNovelBookCard(void) {
                     // 找该坐标处最顶层的可点视图(hitTest)
                     UIView *hit = [win hitTest:p withEvent:nil];
                     if (!hit) continue;
-                    // 排除 UIText/UIControl 文本类(绝不点文本输入框)
-                    NSString *hcls = NSStringFromClass([hit class]);
-                    if ([hcls containsString:@"UIText"] || [hcls containsString:@"TextInteraction"]) continue;
-                    if ([hit isKindOfClass:[UIControl class]]) continue;
-                    qqlog(@"[小说] 坐标兜底: 点屏(%.0f,%.0f) 命中 %@ frame=(%.0f,%.0f %.0fx%.0f)",
-                          p.x, p.y, hcls, hit.frame.origin.x, hit.frame.origin.y,
-                          hit.frame.size.width, hit.frame.size.height);
-                    if (qqfbSimulateTapOnView(hit, @"小说点书坐标")) { done = YES; break; }
+                    // ★ v1.9.4 关键修复: 命中后**不能盲目对任意 UIView 模拟触摸**(闪退实锤!
+                    //   hitTest 命中的是普通 UIView(330x480 容器), 对它 touchesBegan 崩)。
+                    //   必须沿 superview 链向上找 **最近的 Kuikly 渲染视图(KRView)**, 只对它点。
+                    //   找不到 KRView 就跳过该坐标点(不硬点, 防闪退)。
+                    UIView *kr = nil;
+                    for (UIView *cur = hit; cur; cur = cur.superview) {
+                        NSString *ccls = NSStringFromClass([cur class]);
+                        // KRView 是 Kuikly 渲染视图(触摸响应); 或响应 css_click/css_touchUp 也可
+                        if ([ccls containsString:@"KRView"]) { kr = cur; break; }
+                        SEL cClick = NSSelectorFromString(@"css_click");
+                        SEL cTouch = NSSelectorFromString(@"css_touchUp");
+                        if ([cur respondsToSelector:cClick] || [cur respondsToSelector:cTouch]) { kr = cur; break; }
+                    }
+                    if (!kr) {
+                        qqlog(@"[小说] 坐标(%0.f,%.0f) 命中 %@ 无 KRView 祖先, 跳过(防闪退)",
+                              p.x, p.y, NSStringFromClass([hit class]));
+                        continue;
+                    }
+                    // 排除 UIText/Kuikly 文本交互(绝不点文本)
+                    NSString *kcls = NSStringFromClass([kr class]);
+                    if ([kcls containsString:@"UIText"] || [kcls containsString:@"TextInteraction"]) continue;
+                    qqlog(@"[小说] 坐标兜底: 点屏(%.0f,%.0f) KRView=%@ frame=(%.0f,%.0f %.0fx%.0f)",
+                          p.x, p.y, kcls, kr.frame.origin.x, kr.frame.origin.y,
+                          kr.frame.size.width, kr.frame.size.height);
+                    if (qqfbSimulateTapOnView(kr, @"小说点书坐标")) { done = YES; break; }
                 }
             }
         } @catch (NSException *e) {

@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.5"
+#define kQQFloatBallVersion @"1.9.6"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3823,10 +3823,13 @@ static BOOL qqfbTapNovelBookCard(void) {
                             UIView *kr = nil;
                             for (UIView *cur = hit; cur; cur = cur.superview) {
                                 NSString *ccls = NSStringFromClass([cur class]);
-                                if ([ccls containsString:@"KRView"]) { kr = cur; break; }
-                                SEL cClick = NSSelectorFromString(@"css_click");
-                                SEL cTouch = NSSelectorFromString(@"css_touchUp");
-                                if ([cur respondsToSelector:cClick] || [cur respondsToSelector:cTouch]) { kr = cur; break; }
+                                // ★ v1.9.6 铁律: **只认类名含「KR」的 Kuikly 渲染视图**!
+                                //   之前用 respondsToSelector:css_click 兜底, 把普通
+                                //   UIView/UIButton/UITextView(也响应 css_click)误判成书卡片,
+                                //   尤其选中 UITextView 模拟触摸 → 闪退(日志实锤选定UITextView)。
+                                //   现在: 只有类名含 "KR"(KRView/KRRichTextView/KRList等)才算。
+                                //   普通 UIView/UIButton/UITextView 一律跳过。
+                                if ([ccls containsString:@"KR"]) { kr = cur; break; }
                             }
                             if (kr && ![seen containsObject:@((uintptr_t)kr)]) {
                                 [seen addObject:@((uintptr_t)kr)];
@@ -3954,11 +3957,14 @@ static BOOL qqfbSwipeRightToFlip(void) {
 //   · 右滑参照 v1.8.9 安全触摸, 不再向 window 生发(修闪退)
 static void qqfbDoNovelTask(void) {
     qqlog(@"[小说] 开始小说任务：点一本书 → 右滑两下 → 关容器回等级页");
-    // 1) 等书城加载, 多轮尝试点「猜你喜欢」书卡片(最多试 3 次)
+    // 1) 等书城加载, 多轮尝试点「猜你喜欢」书卡片
+    //   v1.9.6: 延长时间(书城Kuikly加载慢, 之前2秒不够, scan 只扫到占位UIView无书KRView)。
+    //   改为每轮3秒×5轮=15秒, 等书城渲染出书卡片KRView。
     BOOL tapped = NO;
-    for (int i = 0; i < 3; i++) {
-        [NSThread sleepForTimeInterval:2.0];
+    for (int i = 0; i < 5; i++) {
+        [NSThread sleepForTimeInterval:3.0];
         if (qqfbTapNovelBookCard()) { tapped = YES; break; }
+        qqlog(@"[小说] 第%d轮未扫到书KRView, 继续等待…", i+1);
     }
     if (!tapped) {
         // 点书失败 = 没进书, 还停在书城。此时右滑会在书城乱滑(用户实测会闪退)。

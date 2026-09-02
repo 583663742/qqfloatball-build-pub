@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.4"
+#define kQQFloatBallVersion @"1.9.5"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3805,47 +3805,64 @@ static BOOL qqfbTapNovelBookCard(void) {
             //   为容错, 依次试几个点(同一本书封面的上部/中部), 防精确坐标偏差。
             if (!done) {
                 CGSize scrSize = [UIScreen mainScreen].bounds.size;
-                NSArray *pts = @[
-                    // 左边第一本书(竖版书封) + 右边第二本, 覆盖不同高度(书名/封面/简介区)
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.62)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.68)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.74)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.72, scrSize.height * 0.68)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.72, scrSize.height * 0.74)],
-                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.80)],
-                ];
-                for (NSValue *pv in pts) {
-                    CGPoint p = [pv CGPointValue];
-                    UIWindow *win = [UIApplication sharedApplication].keyWindow;
-                    if (!win) break;
-                    // 找该坐标处最顶层的可点视图(hitTest)
-                    UIView *hit = [win hitTest:p withEvent:nil];
-                    if (!hit) continue;
-                    // ★ v1.9.4 关键修复: 命中后**不能盲目对任意 UIView 模拟触摸**(闪退实锤!
-                    //   hitTest 命中的是普通 UIView(330x480 容器), 对它 touchesBegan 崩)。
-                    //   必须沿 superview 链向上找 **最近的 Kuikly 渲染视图(KRView)**, 只对它点。
-                    //   找不到 KRView 就跳过该坐标点(不硬点, 防闪退)。
-                    UIView *kr = nil;
-                    for (UIView *cur = hit; cur; cur = cur.superview) {
-                        NSString *ccls = NSStringFromClass([cur class]);
-                        // KRView 是 Kuikly 渲染视图(触摸响应); 或响应 css_click/css_touchUp 也可
-                        if ([ccls containsString:@"KRView"]) { kr = cur; break; }
-                        SEL cClick = NSSelectorFromString(@"css_click");
-                        SEL cTouch = NSSelectorFromString(@"css_touchUp");
-                        if ([cur respondsToSelector:cClick] || [cur respondsToSelector:cTouch]) { kr = cur; break; }
+                UIWindow *win = [UIApplication sharedApplication].keyWindow;
+                // ★ v1.9.5 全屏网格扫描 KRView: 不再盲猜少数几个坐标点(实锤: 6个点 hitTest
+                //   都找不到 KRView, collect 也收 0 个 → 书城布局不固定)。
+                //   改为: 在屏幕内容区(避开顶部导航 y>=120, 避开底部tab y<=屏高-80)按网格扫描,
+                //   hitTest 每点 → 沿 superview 链找最近 KRView/Kuikly渲染视图 → 收集去重。
+                //   输出所有找到的 KRView(诊断书城布局), 再从中选一个像「书卡片」的点击。
+                if (win) {
+                    NSMutableArray *krViews = [NSMutableArray array];   // 去重后的 KRView
+                    NSMutableSet *seen = [NSMutableSet set];
+                    // 扫描范围: 屏幕内容区 y 从 25% 到 92%, 步长 55px; x 从 5% 到 95%, 步长 55px
+                    for (float yy = scrSize.height * 0.25; yy < scrSize.height * 0.92; yy += 55) {
+                        for (float xx = scrSize.width * 0.05; xx < scrSize.width * 0.95; xx += 55) {
+                            CGPoint p = CGPointMake(xx, yy);
+                            UIView *hit = [win hitTest:p withEvent:nil];
+                            if (!hit) continue;
+                            UIView *kr = nil;
+                            for (UIView *cur = hit; cur; cur = cur.superview) {
+                                NSString *ccls = NSStringFromClass([cur class]);
+                                if ([ccls containsString:@"KRView"]) { kr = cur; break; }
+                                SEL cClick = NSSelectorFromString(@"css_click");
+                                SEL cTouch = NSSelectorFromString(@"css_touchUp");
+                                if ([cur respondsToSelector:cClick] || [cur respondsToSelector:cTouch]) { kr = cur; break; }
+                            }
+                            if (kr && ![seen containsObject:@((uintptr_t)kr)]) {
+                                [seen addObject:@((uintptr_t)kr)];
+                                [krViews addObject:kr];
+                            }
+                        }
                     }
-                    if (!kr) {
-                        qqlog(@"[小说] 坐标(%0.f,%.0f) 命中 %@ 无 KRView 祖先, 跳过(防闪退)",
-                              p.x, p.y, NSStringFromClass([hit class]));
-                        continue;
+                    qqlog(@"[小说] 全屏扫描到 %lu 个 KRView:", (unsigned long)krViews.count);
+                    for (UIView *krv in krViews) {
+                        qqlog(@"[小说]   KRView=%@ frame=(%.0f,%.0f %.0fx%.0f)",
+                              NSStringFromClass([krv class]), krv.frame.origin.x, krv.frame.origin.y,
+                              krv.frame.size.width, krv.frame.size.height);
                     }
-                    // 排除 UIText/Kuikly 文本交互(绝不点文本)
-                    NSString *kcls = NSStringFromClass([kr class]);
-                    if ([kcls containsString:@"UIText"] || [kcls containsString:@"TextInteraction"]) continue;
-                    qqlog(@"[小说] 坐标兜底: 点屏(%.0f,%.0f) KRView=%@ frame=(%.0f,%.0f %.0fx%.0f)",
-                          p.x, p.y, kcls, kr.frame.origin.x, kr.frame.origin.y,
-                          kr.frame.size.width, kr.frame.size.height);
-                    if (qqfbSimulateTapOnView(kr, @"小说点书坐标")) { done = YES; break; }
+                    // 从扫到的 KRView 里选「像书卡片」的: 屏幕中下部(y>=屏高*0.4), 尺寸中等
+                    // (宽>=60 高>=60, 排除全屏容器), 优先选 y 靠上 + 带 css_click 的。
+                    UIView *best = nil;
+                    for (UIView *krv in krViews) {
+                        CGRect f = krv.frame;
+                        if (f.origin.y < scrSize.height * 0.35) continue;    // 只用中下部(猜你喜欢区)
+                        if (f.origin.x > scrSize.width - 60) continue;       // 避开右上角
+                        if (f.size.width < 60 || f.size.height < 60) continue;
+                        if (f.size.width > scrSize.width * 0.95) continue;   // 排除全屏容器
+                        if (f.size.height > scrSize.height * 0.9) continue;  // 排除全屏容器
+                        if (!best) { best = krv; continue; }
+                        // 选 y 最小(最靠上)的
+                        if (krv.frame.origin.y < best.frame.origin.y) best = krv;
+                    }
+                    if (best) {
+                        NSString *bcls = NSStringFromClass([best class]);
+                        qqlog(@"[小说] 选定书卡 KRView=%@ frame=(%.0f,%.0f %.0fx%.0f)",
+                              bcls, best.frame.origin.x, best.frame.origin.y,
+                              best.frame.size.width, best.frame.size.height);
+                        if (qqfbSimulateTapOnView(best, @"小说点书KRView")) { done = YES; }
+                    } else {
+                        qqlog(@"[小说] 全屏扫描未找到像书卡片的 KRView(可能书城未加载/书卡片非KRView)");
+                    }
                 }
             }
         } @catch (NSException *e) {

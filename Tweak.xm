@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.8.9"
+#define kQQFloatBallVersion @"1.9.0"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -1683,6 +1683,9 @@ static void qqfbTapCloseButton(void);
 static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag);
 static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag);
 static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag);
+static BOOL qqfbTapNovelBookCard(void);
+static BOOL qqfbSwipeRightToFlip(void);
+static void qqfbDoNovelTask(void);
 // v1.8.7: qqfbDumpViewTree 已移除（诊断完成，dump 遍历 Kuikly 深层视图有闪退嫌疑）
 static void appendLogView(NSString *msg);   // v1.1.0 任务面板代码先于定义使用
 static void runLevelTasksAuto(void) __attribute__((unused));   // v1.2.25 一键执行(v1.4已被闭环替代,保留备用)
@@ -2124,6 +2127,24 @@ static void runAutoTasks(void) {
                             taskDone = YES; // 标记完成跳过后续重试
                             break;
                         }
+
+                        // ★ v1.9.0 小说任务单独走「点书+右滑」流程 ★
+                        // 用户实测：小说书城是 Kuikly 原生渲染，书卡片无标题，旧逻辑
+                        // （只停留+autoTapNativeUI 关键词点击）命中不了书卡片 → 任务完不成。
+                        // 新逻辑：先点「猜你喜欢」任意一本大书 → 右滑翻一页 → 关容器回等级页。
+                        if ([title containsString:@"小说"] || [title containsString:@"看书"]) {
+                            qqlog(@"[auto] 📖 小说任务：点书+右滑翻页（v1.9.0）");
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                openJumpSchema(jump);
+                            });
+                            [NSThread sleepForTimeInterval:1.5]; // 等深链拉起
+                            qqfbDoNovelTask();
+                            taskDone = YES; // 点书+右滑即视为完成（服务端按停留/翻页记账）
+                            qqlog(@"[auto] 📖 小说任务完成（点书+右滑）");
+                            // 直接跳到状态验证（不走停留型循环）
+                            goto novel_verify;
+                        }
+
                         // 停留时长按任务类型取（实测/服务端要求）
                         int staySec = 5;
                         if ([title containsString:@"小游戏"]) staySec = 16;
@@ -2190,14 +2211,21 @@ static void runAutoTasks(void) {
                         [NSThread sleepForTimeInterval:2];
                     }
 
+                novel_verify:
                     // 重新验证该任务是否完成：回等级页触发新 0x9172 → 按 title 找 status
                     // v1.7.5: 旧代码用 fetchTaskList 在线拉取验证（iOS 只回 10 个基础任务，
                     //         额外活跃任务找不到 → 全部误报未完成），改用 0x9172 全量验证
+                    // ★ v1.9.0 叠页修复：先关掉当前任务/阅读容器，避免 openLevelPage 在旧
+                    //   任务页之上再叠一个新等级页（用户实测「打开多个重叠，返回不出去」）。
+                    //   关闭后等级页若已在底层则直接复用；否则再 openLevelPage 兜底。
+                    closeTopContainer();
+                    [NSThread sleepForTimeInterval:1.5];
                     double t0 = qqfbStatusCapturedAt();
                     dispatch_async(dispatch_get_main_queue(), ^{
                         openLevelPage();
                     });
-                    BOOL got = qqfbWaitStatusRefresh(t0, 20);
+                    // v1.9.0 提速：验证超时 20s → 12s（服务端通常 3~6 秒返回新 0x9172）
+                    BOOL got = qqfbWaitStatusRefresh(t0, 12);
                     int st = -1;
                     if (got) {
                         NSArray *freshList = qqfbReadExtraOnlyTasks();
@@ -3334,6 +3362,24 @@ __attribute__((unused)) static void showLogPanel(void) {
         return;
     }
     appendLogView([NSString stringWithFormat:@"🧪 测试单个任务：%@（仅执行此行）", title]);
+    // ★ v1.9.0 单测小说任务：走新的「点书+右滑」流程（不再只停留不点书）
+    if ([title containsString:@"小说"] || [title containsString:@"看书"]) {
+        if (jump.length > 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                qqlog(@"[任务测试] 小说：打开书城 jump=%@", jump);
+                openJumpSchema(jump);
+                appendLogView(@"➡️ 小说书城已打开，开始点书+右滑翻页（v1.9.0）…");
+            });
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                @autoreleasepool {
+                    [NSThread sleepForTimeInterval:1.5];
+                    qqfbDoNovelTask();
+                    appendLogView(@"✅ 小说单测完成（点书+右滑），已关容器回等级页");
+                }
+            });
+            return;
+        }
+    }
     // v1.8.1: 用户点选任务后：打开页面 + 自动扫描点击 5 轮（不再「后续操作由用户完成」——
     // 用户实测「进去小说又不点 就是乱逛」= 手动点任务后插件完全不动）
     if (jump.length > 0) {
@@ -3650,6 +3696,165 @@ static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
         qqlog(@"[autotap] 模拟触摸异常(%@): %@", logTag, e);
         return NO;
     }
+}
+
+// ── v1.9.0 小说任务专用：点「猜你喜欢」任意一本大书卡片 ──
+// 问题：小说书城是 Kuikly 原生渲染，书卡片是「无标题的 Kuikly 手势组件」，
+//       autoTapNativeUI 靠关键词匹配（签到/打卡/领取）永远命中不了书卡片，
+//       只有兜底大卡片点击能点，但筛选严苛 + 时机容易太早 → 任务完不成。
+// 本函数：等待页面加载后，遍历视图树找屏幕中部的「大卡片」（宽>=100 高>=80），
+//       用 v1.8.9 的 qqfbSimulateTapOnView 模拟真实触摸点下去（跟真人手指一致）。
+//       会跳过顶部导航区(y<120)和右上角操作区(x>屏宽-80)，只点内容区大卡片。
+// 返回 YES=成功点了一张书卡片。
+static BOOL qqfbTapNovelBookCard(void) {
+    __block BOOL done = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            CGSize scr = [UIScreen mainScreen].bounds.size;
+            NSMutableArray *cards = [NSMutableArray array];
+            // 复用 collectNativeActionsInView 收集所有可点组件（含 Kuikly 手势/css_click）
+            NSMutableArray *buttons = [NSMutableArray array];
+            NSMutableArray *textViews = [NSMutableArray array];
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                collectNativeActionsInView(win, buttons, textViews);
+            }
+            for (NSDictionary *item in buttons) {
+                UIView *v = item[@"btn"];
+                if (!v || v.hidden || v.alpha <= 0.1) continue;
+                CGRect f = v.frame;
+                CGFloat x = f.origin.x, y = f.origin.y;
+                // 排除顶部导航区（返回/搜索/分类 tab 都在那）
+                if (y < 150) continue;
+                // 排除右上角操作区
+                if (x > scr.width - 80) continue;
+                // 只收大卡片（书封面/「猜你喜欢」的竖版书卡，宽高都够大）
+                if (f.size.width < 90 || f.size.height < 80) continue;
+                // 优先 Kuikly 组件（css_click/css_touchUp/手势），排除纯文本链接
+                BOOL kuikly = [item[@"kuiklyClick"] boolValue] || [item[@"kuiklyTouch"] boolValue] || [item[@"gesture"] boolValue];
+                if (kuikly) {
+                    [cards addObject:item];
+                }
+            }
+            if (cards.count == 0) {
+                qqlog(@"[小说] 未找到可点的书卡片（视图树无匹配）");
+                return;
+            }
+            // 点最靠上/最大的那张书卡片（「猜你喜欢」区的第一本竖版书）
+            [cards sortUsingComparator:^NSComparisonResult(id a, id b) {
+                CGRect fa = [a[@"btn"] frame], fb = [b[@"btn"] frame];
+                if (fa.origin.y != fb.origin.y) return fa.origin.y < fb.origin.y ? NSOrderedAscending : NSOrderedDescending;
+                if (fa.size.width != fb.size.width) return fa.size.width > fb.size.width ? NSOrderedAscending : NSOrderedDescending;
+                return NSOrderedAscending;
+            }];
+            NSDictionary *target = cards.firstObject;
+            UIView *tv = target[@"btn"];
+            id kuiklyClick = target[@"kuiklyClick"];
+            id kuiklyTouch = target[@"kuiklyTouch"];
+            if (kuiklyClick || kuiklyTouch) {
+                if (qqfbKuiklyInvoke(tv, kuiklyClick ?: kuiklyTouch, @"小说点书")) done = YES;
+            } else {
+                // 手势组件：优先模拟触摸，兜底走手势
+                if (qqfbSimulateTapOnView(tv, @"小说点书")) {
+                    done = YES;
+                } else {
+                    for (UIGestureRecognizer *g in tv.gestureRecognizers) {
+                        if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                            if (qqfbGestureInvoke(g, @"小说点书")) { done = YES; break; }
+                        }
+                    }
+                }
+            }
+            if (done) {
+                qqlog(@"[小说] 已点书卡片: %@ frame=(%.0f,%.0f %.0fx%.0f)",
+                      NSStringFromClass([tv class]), tv.frame.origin.x, tv.frame.origin.y,
+                      tv.frame.size.width, tv.frame.size.height);
+            }
+        } @catch (NSException *e) {
+            qqlog(@"[小说] 点书卡片异常: %@", e);
+        }
+    });
+    // 等待一点时间让点击生效（页面跳转/加载）
+    [NSThread sleepForTimeInterval:2.0];
+    return done;
+}
+
+// ── v1.9.0 小说任务：右滑翻一页（模拟真实滑动）──
+// 「看任一本书」服务端只要求在书内停留一下/翻页即算完成。右滑（从右往左滑）
+// 是小说阅读页的标准翻页手势。用 UITouch 序列模拟 touchesBegan，
+// 逐步移动 _locationInWindow 构造 touchesMoved，最后 touchesEnded —— 完整滑动。
+// 找不到阅读页容器时返回 NO（不硬翻，避免误操作）。
+static BOOL qqfbSwipeRightToFlip(void) {
+    __block BOOL done = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *win = [UIApplication sharedApplication].keyWindow;
+            if (!win) return;
+            // 取屏幕高度作为滑动高度参考，从右侧 1/4 处滑到左侧 1/4 处
+            CGSize scr = [UIScreen mainScreen].bounds.size;
+            CGFloat startX = scr.width * 0.8;
+            CGFloat endX = scr.width * 0.2;
+            CGFloat startY = scr.height * 0.5;
+            Class touchCls = NSClassFromString(@"UITouch");
+            if (!touchCls) return;
+            id touch = [[touchCls alloc] init];
+            [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
+            [touch setValue:@(1) forKey:@"_tapCount"];
+            [touch setValue:win forKey:@"_window"];
+            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(startX, startY)] forKey:@"_locationInWindow"];
+            [touch setValue:[NSNumber numberWithDouble:[[NSProcessInfo processInfo] systemUptime]] forKey:@"_timestamp"];
+            Class evCls = NSClassFromString(@"UITouchesEvent");
+            id event = [[evCls alloc] init];
+            SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
+            if (event && addSel && [event respondsToSelector:addSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [event performSelector:addSel withObject:touch withObject:@NO];
+#pragma clang diagnostic pop
+            }
+            NSSet *touchSet = [NSSet setWithObject:touch];
+            [win touchesBegan:touchSet withEvent:event];
+            // 分 6 步移动，模拟手指逐渐右滑
+            for (int i = 1; i <= 6; i++) {
+                CGFloat fx = startX - (startX - endX) * i / 6.0;
+                [touch setValue:@(UITouchPhaseMoved) forKey:@"_phase"];
+                [touch setValue:[NSValue valueWithCGPoint:CGPointMake(fx, startY)] forKey:@"_locationInWindow"];
+                [win touchesMoved:touchSet withEvent:event];
+                [NSThread sleepForTimeInterval:0.02];
+            }
+            [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
+            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(endX, startY)] forKey:@"_locationInWindow"];
+            [win touchesEnded:touchSet withEvent:event];
+            qqlog(@"[小说] 右滑翻页完成 (%.0f→%.0f)", startX, endX);
+            done = YES;
+        } @catch (NSException *e) {
+            qqlog(@"[小说] 右滑异常: %@", e);
+        }
+    });
+    [NSThread sleepForTimeInterval:1.0];
+    return done;
+}
+
+// ── v1.9.0 小说任务主流程：点书 → 右滑翻页 → 关闭回等级页 ──
+// 供 runAutoTasks 的小说任务分支调用（替代原先"只停留不点书"的无效逻辑）。
+// 返回前会把容器关闭并回等级页，由调用方负责后续状态验证。
+static void qqfbDoNovelTask(void) {
+    qqlog(@"[小说] 开始小说任务：点一本书 → 右滑翻页 → 关容器回等级页");
+    // 1) 等页面加载，多轮尝试点书卡片（书城可能加载慢，最多试 3 次）
+    BOOL tapped = NO;
+    for (int i = 0; i < 3; i++) {
+        [NSThread sleepForTimeInterval:2.0];
+        if (qqfbTapNovelBookCard()) { tapped = YES; break; }
+    }
+    if (!tapped) {
+        qqlog(@"[小说] ⚠ 点书失败（视图树找不到书卡片），继续尝试右滑……");
+    }
+    // 2) 进入书内后右滑翻一页（"看任一本书"服务端看停留/翻页）
+    qqfbSwipeRightToFlip();
+    // 3) 稍等停留，让服务端判定
+    [NSThread sleepForTimeInterval:3.0];
+    // 4) 关闭阅读容器回等级页
+    closeTopContainer();
+    [NSThread sleepForTimeInterval:2.0];
 }
 
 // ── 触发 Kuikly 组件点击（v1.8.8, 保留手势路径作 fallback; v1.8.9 主路径改模拟触摸）──

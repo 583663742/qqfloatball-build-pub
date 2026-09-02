@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.0"
+#define kQQFloatBallVersion @"1.9.1"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3731,7 +3731,12 @@ static BOOL qqfbTapNovelBookCard(void) {
                 // 只收大卡片（书封面/「猜你喜欢」的竖版书卡，宽高都够大）
                 if (f.size.width < 90 || f.size.height < 80) continue;
                 // 优先 Kuikly 组件（css_click/css_touchUp/手势），排除纯文本链接
-                BOOL kuikly = [item[@"kuiklyClick"] boolValue] || [item[@"kuiklyTouch"] boolValue] || [item[@"gesture"] boolValue];
+                // ★ v1.9.1 修复: kuiklyClick/kuiklyTouch 是 block(不是NSNumber)!
+                //   对 block 调 boolValue 会抛 unrecognized selector(实锤日志
+                //   "-[__NSMallocBlock__ boolValue]") → 点书失败。改为判断是否为 nil。
+                id kClick = item[@"kuiklyClick"];
+                id kTouch = item[@"kuiklyTouch"];
+                BOOL kuikly = (kClick != nil) || (kTouch != nil) || [item[@"gesture"] boolValue];
                 if (kuikly) {
                     [cards addObject:item];
                 }
@@ -3779,30 +3784,42 @@ static BOOL qqfbTapNovelBookCard(void) {
     return done;
 }
 
-// ── v1.9.0 小说任务：右滑翻一页（模拟真实滑动）──
-// 「看任一本书」服务端只要求在书内停留一下/翻页即算完成。右滑（从右往左滑）
-// 是小说阅读页的标准翻页手势。用 UITouch 序列模拟 touchesBegan，
-// 逐步移动 _locationInWindow 构造 touchesMoved，最后 touchesEnded —— 完整滑动。
-// 找不到阅读页容器时返回 NO（不硬翻，避免误操作）。
+// ── v1.9.1 小说任务：右滑翻一页（安全版，参照 v1.8.9 已验证的模拟触摸）──
+// 「看任一本书」右滑翻页 = 从右往左滑。完全照 qqfbSimulateTapOnView 的安全结构：
+//   · 触摸发给「keyWindow 最顶层的可见渲染视图」(不是 window 本身, 避免 UIResponder 链错乱崩)
+//   · 设置 _view ivar(v1.8.9 有, 旧版漏了 → 命中错视图)
+//   · 主线程内**不 sleep**(改为 touch._timestamp 递增模拟滑动时间, 不阻塞 UI)
+//   · 完整序列 began → moved×6 → ended
+// 找不到可见渲染视图时返回 NO(不硬滑, 避免误触返回/菜单)。
 static BOOL qqfbSwipeRightToFlip(void) {
     __block BOOL done = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             UIWindow *win = [UIApplication sharedApplication].keyWindow;
             if (!win) return;
-            // 取屏幕高度作为滑动高度参考，从右侧 1/4 处滑到左侧 1/4 处
+            // 找 keyWindow 最顶层的可见渲染视图(当前显示页), 触摸发给它而不是 window
+            UIView *target = nil;
+            for (UIView *sub in win.subviews) {
+                if (sub.frame.size.width > 50 && sub.frame.size.height > 50 && sub.alpha > 0.1 && !sub.hidden) {
+                    target = sub;
+                    break;
+                }
+            }
+            if (!target) target = win;
             CGSize scr = [UIScreen mainScreen].bounds.size;
-            CGFloat startX = scr.width * 0.8;
-            CGFloat endX = scr.width * 0.2;
-            CGFloat startY = scr.height * 0.5;
+            CGFloat startX = scr.width * 0.8;   // 起点: 屏幕右侧 1/4
+            CGFloat endX   = scr.width * 0.2;   // 终点: 屏幕左侧 1/4
+            CGFloat y      = scr.height * 0.5;  // 高度中部
             Class touchCls = NSClassFromString(@"UITouch");
             if (!touchCls) return;
             id touch = [[touchCls alloc] init];
+            double t0 = [[NSProcessInfo processInfo] systemUptime];
             [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
             [touch setValue:@(1) forKey:@"_tapCount"];
             [touch setValue:win forKey:@"_window"];
-            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(startX, startY)] forKey:@"_locationInWindow"];
-            [touch setValue:[NSNumber numberWithDouble:[[NSProcessInfo processInfo] systemUptime]] forKey:@"_timestamp"];
+            [touch setValue:target forKey:@"_view"];
+            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(startX, y)] forKey:@"_locationInWindow"];
+            [touch setValue:[NSNumber numberWithDouble:t0] forKey:@"_timestamp"];
             Class evCls = NSClassFromString(@"UITouchesEvent");
             id event = [[evCls alloc] init];
             SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
@@ -3813,19 +3830,20 @@ static BOOL qqfbSwipeRightToFlip(void) {
 #pragma clang diagnostic pop
             }
             NSSet *touchSet = [NSSet setWithObject:touch];
-            [win touchesBegan:touchSet withEvent:event];
-            // 分 6 步移动，模拟手指逐渐右滑
+            [target touchesBegan:touchSet withEvent:event];
+            // 分 6 步移动, 用 _timestamp 递增模拟滑动时间(不真实 sleep, 不阻塞主线程)
             for (int i = 1; i <= 6; i++) {
                 CGFloat fx = startX - (startX - endX) * i / 6.0;
                 [touch setValue:@(UITouchPhaseMoved) forKey:@"_phase"];
-                [touch setValue:[NSValue valueWithCGPoint:CGPointMake(fx, startY)] forKey:@"_locationInWindow"];
-                [win touchesMoved:touchSet withEvent:event];
-                [NSThread sleepForTimeInterval:0.02];
+                [touch setValue:[NSValue valueWithCGPoint:CGPointMake(fx, y)] forKey:@"_locationInWindow"];
+                [touch setValue:[NSNumber numberWithDouble:t0 + i * 0.02] forKey:@"_timestamp"];
+                [target touchesMoved:touchSet withEvent:event];
             }
             [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
-            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(endX, startY)] forKey:@"_locationInWindow"];
-            [win touchesEnded:touchSet withEvent:event];
-            qqlog(@"[小说] 右滑翻页完成 (%.0f→%.0f)", startX, endX);
+            [touch setValue:[NSValue valueWithCGPoint:CGPointMake(endX, y)] forKey:@"_locationInWindow"];
+            [touch setValue:[NSNumber numberWithDouble:t0 + 0.15] forKey:@"_timestamp"];
+            [target touchesEnded:touchSet withEvent:event];
+            qqlog(@"[小说] 右滑翻页完成(触发视图:%@)", NSStringFromClass([target class]));
             done = YES;
         } @catch (NSException *e) {
             qqlog(@"[小说] 右滑异常: %@", e);
@@ -3835,25 +3853,38 @@ static BOOL qqfbSwipeRightToFlip(void) {
     return done;
 }
 
-// ── v1.9.0 小说任务主流程：点书 → 右滑翻页 → 关闭回等级页 ──
-// 供 runAutoTasks 的小说任务分支调用（替代原先"只停留不点书"的无效逻辑）。
-// 返回前会把容器关闭并回等级页，由调用方负责后续状态验证。
+// ── v1.9.1 小说任务主流程：点书 → 右滑两下 → 关闭回等级页 ──
+// 用户实测要求：进书城「猜你喜欢」点一本 → 进去右滑两下翻页 → 返回等级页。
+// 关键改进(v1.9.1)：
+//   · 只有「真正点中书」才右滑(点失败=还在书城, 硬右滑会乱滑/闪退)
+//   · 右滑两下(用户要求「右滑两下」)
+//   · 右滑参照 v1.8.9 安全触摸, 不再向 window 生发(修闪退)
 static void qqfbDoNovelTask(void) {
-    qqlog(@"[小说] 开始小说任务：点一本书 → 右滑翻页 → 关容器回等级页");
-    // 1) 等页面加载，多轮尝试点书卡片（书城可能加载慢，最多试 3 次）
+    qqlog(@"[小说] 开始小说任务：点一本书 → 右滑两下 → 关容器回等级页");
+    // 1) 等书城加载, 多轮尝试点「猜你喜欢」书卡片(最多试 3 次)
     BOOL tapped = NO;
     for (int i = 0; i < 3; i++) {
         [NSThread sleepForTimeInterval:2.0];
         if (qqfbTapNovelBookCard()) { tapped = YES; break; }
     }
     if (!tapped) {
-        qqlog(@"[小说] ⚠ 点书失败（视图树找不到书卡片），继续尝试右滑……");
+        // 点书失败 = 没进书, 还停在书城。此时右滑会在书城乱滑(用户实测会闪退)。
+        qqlog(@"[小说] ⚠ 点书失败, 不再右滑(避免书城乱滑), 直接关容器回等级页");
+        closeTopContainer();
+        [NSThread sleepForTimeInterval:2.0];
+        return;
     }
-    // 2) 进入书内后右滑翻一页（"看任一本书"服务端看停留/翻页）
+    // 2) 点进书后, 等阅读页加载, 右滑两下翻页
+    [NSThread sleepForTimeInterval:3.0];
+    qqlog(@"[小说] 已进书, 右滑第 1 下…");
     qqfbSwipeRightToFlip();
-    // 3) 稍等停留，让服务端判定
+    [NSThread sleepForTimeInterval:2.0];
+    qqlog(@"[小说] 右滑第 2 下…");
+    qqfbSwipeRightToFlip();
+    // 3) 稍等停留, 让服务端判定「看任一本书」
     [NSThread sleepForTimeInterval:3.0];
     // 4) 关闭阅读容器回等级页
+    qqlog(@"[小说] 右滑完成, 关容器回等级页");
     closeTopContainer();
     [NSThread sleepForTimeInterval:2.0];
 }
@@ -4106,8 +4137,10 @@ static void autoTapNativeUI(void) {
                 }
                 // v1.8.5: Kuikly 组件优先（css_click=官方业务点击），手势组件兜底
                 [candidates sortUsingComparator:^NSComparisonResult(id a, id b) {
-                    BOOL aK = [a[@"kuiklyClick"] boolValue] || [a[@"kuiklyTouch"] boolValue];
-                    BOOL bK = [b[@"kuiklyClick"] boolValue] || [b[@"kuiklyTouch"] boolValue];
+                    // ★ v1.9.1 修复: kuiklyClick/kuiklyTouch 是 block(非NSNumber),
+                    //   对 block 调 boolValue 抛 unrecognized selector 崩溃。改为判 nil。
+                    BOOL aK = (a[@"kuiklyClick"] != nil) || (a[@"kuiklyTouch"] != nil);
+                    BOOL bK = (b[@"kuiklyClick"] != nil) || (b[@"kuiklyTouch"] != nil);
                     if (aK != bK) return aK ? NSOrderedAscending : NSOrderedDescending;
                     CGRect fa = [a[@"btn"] frame], fb = [b[@"btn"] frame];
                     if (fa.origin.y < fb.origin.y) return NSOrderedAscending;

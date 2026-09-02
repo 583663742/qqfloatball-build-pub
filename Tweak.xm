@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.2"
+#define kQQFloatBallVersion @"1.9.3"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3726,9 +3726,7 @@ static BOOL qqfbTapNovelBookCard(void) {
             for (NSDictionary *item in buttons) {
                 UIView *v = item[@"btn"];
                 if (!v || v.hidden || v.alpha <= 0.1) continue;
-                // ★ v1.9.2 铁律: 排除所有「文本输入/文本交互」相关视图!
-                //   实锤: 之前把 UITextView(318x84) 和 _UITextMe...(UITextInteraction)
-                //   当成书卡片点 → 点不中书还弹出文本菜单/误触。书卡片绝不是文本视图。
+                // ★ v1.9.3 铁律: 排除所有「文本输入/文本交互」相关视图!
                 NSString *cls = NSStringFromClass([v class]);
                 if ([cls containsString:@"UIText"] || [cls containsString:@"TextInteraction"]) continue;
                 // 排除纯 UIControl(UIButton 等)——书卡片是 Kuikly 手势/css_click 组件
@@ -3736,17 +3734,16 @@ static BOOL qqfbTapNovelBookCard(void) {
                 CGRect f = v.frame;
                 CGFloat x = f.origin.x, y = f.origin.y;
                 CGFloat w = f.size.width, h = f.size.height;
-                // 排除顶部导航区（返回/搜索/分类 tab 都在那）
+                // 排除顶部导航区 + 右上角操作区
                 if (y < 150) continue;
-                // 排除右上角操作区
                 if (x > scr.width - 80) continue;
-                // 只收「竖版书封卡片」(猜你喜欢): 高度明显大于宽度, 中等尺寸。
-                //   宽 80~200, 高 110~280, 且 高 >= 宽*1.15 (竖版封面)
-                //   排除 318x84 这种横长条(那是文本/空白区域), 排除 116x154 这种小入口。
-                if (w < 80 || w > 200) continue;
-                if (h < 110 || h > 280) continue;
-                if (h < w * 1.15) continue;
-                // 优先 Kuikly 组件（css_click/css_touchUp/手势），排除纯文本链接
+                // ★ v1.9.3 放宽: 不再强制「竖版书封」! dump 实锤书卡片是 KRView 行
+                //   (398x108 横条) 或带书名的 KRRichTextView, 不是竖版封面尺寸。
+                //   改为收「内容区中等尺寸」的 Kuikly 卡片: 宽>=80 高>=80, 排除全屏容器
+                //   (427x932/430x932 那种) 和过小的文本链接。
+                if (w < 80 || h < 80) continue;
+                if (w > scr.width * 0.98) continue;   // 排除全屏容器
+                if (h > scr.height * 0.98) continue;  // 排除全屏容器
                 id kClick = item[@"kuiklyClick"];
                 id kTouch = item[@"kuiklyTouch"];
                 BOOL kuikly = (kClick != nil) || (kTouch != nil) || [item[@"gesture"] boolValue];
@@ -3754,9 +3751,21 @@ static BOOL qqfbTapNovelBookCard(void) {
                     [cards addObject:item];
                 }
             }
+            // ★ v1.9.3 候选诊断日志: 输出找到的所有候选(类名+frame), 方便下次精准定位
+            qqlog(@"[小说] 收集到 %lu 个 Kuikly 候选卡片", (unsigned long)cards.count);
+            for (NSDictionary *item in cards) {
+                UIView *v = item[@"btn"];
+                qqlog(@"[小说] 候选: %@ frame=(%.0f,%.0f %.0fx%.0f) kClick=%d kTouch=%d g=%d",
+                      NSStringFromClass([v class]), v.frame.origin.x, v.frame.origin.y,
+                      v.frame.size.width, v.frame.size.height,
+                      item[@"kuiklyClick"]!=nil, item[@"kuiklyTouch"]!=nil,
+                      [item[@"gesture"] boolValue]);
+            }
+            // ★ v1.9.3 不再提前 return! 书城是 Kuikly 列表渲染, collect 常收不到可点卡片,
+            //   若在此 return 就永远到不了下面的「坐标兜底」。改为: cards 为空则直接走
+            //   坐标兜底(模拟点「猜你喜欢」第一本书), 不为空则优先点视图候选。
             if (cards.count == 0) {
-                qqlog(@"[小说] 未找到可点的书卡片（视图树无匹配）");
-                return;
+                qqlog(@"[小说] 视图树无候选卡片, 走坐标兜底点「猜你喜欢」…");
             }
             // 点最靠上/最大的那张书卡片（「猜你喜欢」区的第一本竖版书）
             [cards sortUsingComparator:^NSComparisonResult(id a, id b) {
@@ -3765,28 +3774,59 @@ static BOOL qqfbTapNovelBookCard(void) {
                 if (fa.size.width != fb.size.width) return fa.size.width > fb.size.width ? NSOrderedAscending : NSOrderedDescending;
                 return NSOrderedAscending;
             }];
-            NSDictionary *target = cards.firstObject;
-            UIView *tv = target[@"btn"];
-            id kuiklyClick = target[@"kuiklyClick"];
-            id kuiklyTouch = target[@"kuiklyTouch"];
-            if (kuiklyClick || kuiklyTouch) {
-                if (qqfbKuiklyInvoke(tv, kuiklyClick ?: kuiklyTouch, @"小说点书")) done = YES;
-            } else {
-                // 手势组件：优先模拟触摸，兜底走手势
-                if (qqfbSimulateTapOnView(tv, @"小说点书")) {
-                    done = YES;
+            NSDictionary *target = cards.count > 0 ? cards.firstObject : nil;
+            UIView *tv = target ? target[@"btn"] : nil;
+            if (tv) {
+                id kuiklyClick = target[@"kuiklyClick"];
+                id kuiklyTouch = target[@"kuiklyTouch"];
+                if (kuiklyClick || kuiklyTouch) {
+                    if (qqfbKuiklyInvoke(tv, kuiklyClick ?: kuiklyTouch, @"小说点书")) done = YES;
                 } else {
-                    for (UIGestureRecognizer *g in tv.gestureRecognizers) {
-                        if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
-                            if (qqfbGestureInvoke(g, @"小说点书")) { done = YES; break; }
+                    // 手势组件：优先模拟触摸，兜底走手势
+                    if (qqfbSimulateTapOnView(tv, @"小说点书")) {
+                        done = YES;
+                    } else {
+                        for (UIGestureRecognizer *g in tv.gestureRecognizers) {
+                            if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                                if (qqfbGestureInvoke(g, @"小说点书")) { done = YES; break; }
+                            }
                         }
                     }
                 }
+                if (done) {
+                    qqlog(@"[小说] 已点书卡片: %@ frame=(%.0f,%.0f %.0fx%.0f)",
+                          NSStringFromClass([tv class]), tv.frame.origin.x, tv.frame.origin.y,
+                          tv.frame.size.width, tv.frame.size.height);
+                }
             }
-            if (done) {
-                qqlog(@"[小说] 已点书卡片: %@ frame=(%.0f,%.0f %.0fx%.0f)",
-                      NSStringFromClass([tv class]), tv.frame.origin.x, tv.frame.origin.y,
-                      tv.frame.size.width, tv.frame.size.height);
+            // ★ v1.9.3 坐标兜底: 视图候选找不到/点不中(书城是Kuikly列表渲染, collect常收不到
+            //   可点的书卡片)时, 直接按坐标模拟触摸点「猜你喜欢」第一本书。
+            //   从截图: 「猜你喜欢」第一本(左)竖版书封在屏幕左下半, 中心约(x=屏宽*0.3, y=屏高*0.72)。
+            //   为容错, 依次试几个点(同一本书封面的上部/中部), 防精确坐标偏差。
+            if (!done) {
+                CGSize scrSize = [UIScreen mainScreen].bounds.size;
+                NSArray *pts = @[
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.30, scrSize.height * 0.70)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.30, scrSize.height * 0.75)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.28, scrSize.height * 0.65)],
+                    [NSValue valueWithCGPoint:CGPointMake(scrSize.width * 0.30, scrSize.height * 0.80)],
+                ];
+                for (NSValue *pv in pts) {
+                    CGPoint p = [pv CGPointValue];
+                    UIWindow *win = [UIApplication sharedApplication].keyWindow;
+                    if (!win) break;
+                    // 找该坐标处最顶层的可点视图(hitTest)
+                    UIView *hit = [win hitTest:p withEvent:nil];
+                    if (!hit) continue;
+                    // 排除 UIText/UIControl 文本类(绝不点文本输入框)
+                    NSString *hcls = NSStringFromClass([hit class]);
+                    if ([hcls containsString:@"UIText"] || [hcls containsString:@"TextInteraction"]) continue;
+                    if ([hit isKindOfClass:[UIControl class]]) continue;
+                    qqlog(@"[小说] 坐标兜底: 点屏(%.0f,%.0f) 命中 %@ frame=(%.0f,%.0f %.0fx%.0f)",
+                          p.x, p.y, hcls, hit.frame.origin.x, hit.frame.origin.y,
+                          hit.frame.size.width, hit.frame.size.height);
+                    if (qqfbSimulateTapOnView(hit, @"小说点书坐标")) { done = YES; break; }
+                }
             }
         } @catch (NSException *e) {
             qqlog(@"[小说] 点书卡片异常: %@", e);

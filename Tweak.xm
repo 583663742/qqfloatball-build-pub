@@ -41,7 +41,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.9"
+#define kQQFloatBallVersion @"1.9.10"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -4003,11 +4003,15 @@ static BOOL qqfbTapNovelBookCard(void) {
                         // 排除全屏容器(宽>98%屏 或 高>90%屏)
                         if (ww > scrSize.width * 0.98) continue;
                         if (wh > scrSize.height * 0.9) continue;
-                        // 排除过小(图标/文字, <60x60)与顶部导航(y<120 的 tab/返回)
-                        if (ww < 60 || wh < 60) continue;
+                        // 排除顶部导航(y<120)与右上角
                         if (wy < 120) continue;
-                        // 排除右上角操作区
                         if (wx > scrSize.width - 60) continue;
+                        // ★ v1.9.10 书卡片特征: **横向扁卡片**(宽>=高), 高 60~220。
+                        //   排除 330x480 这种"高>宽"的内容容器(误选它=点内容区不进书, 日志实锤)。
+                        //   也排除过小(<60x60)和纯文本。
+                        if (ww < 60 || wh < 60) continue;
+                        if (wh > ww) continue;              // 排除竖高容器(330x480是高>=宽)
+                        if (wh > 220) continue;             // 书卡片高不超过220(排除大内容区)
                         BOOL isKR = [NSStringFromClass([krv class]) containsString:@"KR"];
                         if (!best) { best = krv; bestIsKR = isKR; continue; }
                         // 优先 KR 类; 同类中取 y 靠上(第一本书)
@@ -4019,7 +4023,13 @@ static BOOL qqfbTapNovelBookCard(void) {
                         NSString *bcls = NSStringFromClass([best class]);
                         qqlog(@"[小说] 选定书卡 KRView=%@ 屏坐标=(%.0f,%.0f %.0fx%.0f)",
                               bcls, bf.origin.x, bf.origin.y, bf.size.width, bf.size.height);
-                        if (qqfbSimulateTapOnView(best, @"小说点书KRView")) { done = YES; }
+                        // ★ v1.9.10 只有点中的是**真正的 KrasyView/Kuikly 书卡片**才认定进书(done=YES)。
+                        //   之前点到 330x480 普通 UIView 容器也算 done=YES → qqfbDoNovelTask 误认为"进书"
+                        //   然后右滑 → 在书城页右滑闪退。现在非 KR 类点中不算进书(不右滑, 防崩)。
+                        BOOL targetIsKR = [bcls containsString:@"KR"];
+                        if (qqfbSimulateTapOnView(best, @"小说点书KRView")) {
+                            done = targetIsKR;   // 只有 KR 类才算点中
+                        }
                     } else {
                         qqlog(@"[小说] 全屏扫描未找到像书卡片的 KRView(可能书城未加载/书卡片非KRView)");
                     }
@@ -4136,7 +4146,7 @@ static void qqfbScrollDownOnce(void) {
             if (targetSV) {
                 CGFloat maxOffset = targetSV.contentSize.height - targetSV.bounds.size.height;
                 CGPoint cur = targetSV.contentOffset;
-                CGFloat newY = MIN(cur.y + 500, MAX(maxOffset, 0));
+                CGFloat newY = MIN(cur.y + 800, MAX(maxOffset, 0));
                 [targetSV setContentOffset:CGPointMake(cur.x, newY) animated:YES];
                 qqlog(@"[小说] 向下滚动到猜你喜欢 offset.y=%.0f→%.0f (max=%.0f)",
                       cur.y, newY, maxOffset);

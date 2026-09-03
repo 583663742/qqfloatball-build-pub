@@ -41,7 +41,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.8"
+#define kQQFloatBallVersion @"1.9.9"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3984,29 +3984,41 @@ static BOOL qqfbTapNovelBookCard(void) {
                               NSStringFromClass([krv class]), krv.frame.origin.x, krv.frame.origin.y,
                               krv.frame.size.width, krv.frame.size.height);
                     }
-                    // 从扫到的视图里选「像书卡片」的: 屏幕中下部(y>=屏高*0.35), 尺寸中等
-                    // (宽>=60 高>=60, 排除全屏容器), **优先选类名含KR**(书卡片多是KR类),
-                    // 再退到 y 最靠上的。
+                    // ★ v1.9.9 重写选中逻辑: ---关键修复---
+                    //  之前用 krv.frame.origin.y(相对父容器的坐标)判断屏幕位置——但这些 KRView 书卡片
+                    //  是列表 cell, frame.origin.y 全是 0(相对 KRListView), 导致 `f.origin.y<屏高*0.35`
+                    //  恒成立 → 全部误判为「不在中下部」→ 全部排除 → 点不到!
+                    //  修复: 用 convertRect 转到**屏幕/窗口真实坐标**再判断。且书卡片尺寸是 230x80 这种
+                    //  (不是竖版), 放宽尺寸(只看非全屏容器即可)。优先类名含 KR 的(书卡片)。
                     UIView *best = nil;
                     BOOL bestIsKR = NO;
                     for (UIView *krv in krViews) {
-                        CGRect f = krv.frame;
-                        if (f.origin.y < scrSize.height * 0.35) continue;    // 只用中下部(猜你喜欢区)
-                        if (f.origin.x > scrSize.width - 60) continue;       // 避开右上角
-                        if (f.size.width < 60 || f.size.height < 60) continue;
-                        if (f.size.width > scrSize.width * 0.95) continue;   // 排除全屏容器
-                        if (f.size.height > scrSize.height * 0.9) continue;  // 排除全屏容器
+                        // 转到窗口真实坐标
+                        CGRect wf = [krv convertRect:krv.bounds toView:nil];
+                        CGFloat wx = wf.origin.x, wy = wf.origin.y;
+                        CGFloat ww = wf.size.width, wh = wf.size.height;
+                        // 不在可视区域(屏幕内)的一律跳过
+                        if (wy < 0 || wy > scrSize.height) continue;
+                        if (wx < 0 || wx > scrSize.width) continue;
+                        // 排除全屏容器(宽>98%屏 或 高>90%屏)
+                        if (ww > scrSize.width * 0.98) continue;
+                        if (wh > scrSize.height * 0.9) continue;
+                        // 排除过小(图标/文字, <60x60)与顶部导航(y<120 的 tab/返回)
+                        if (ww < 60 || wh < 60) continue;
+                        if (wy < 120) continue;
+                        // 排除右上角操作区
+                        if (wx > scrSize.width - 60) continue;
                         BOOL isKR = [NSStringFromClass([krv class]) containsString:@"KR"];
                         if (!best) { best = krv; bestIsKR = isKR; continue; }
-                        // 优先 KR 类; 同类中取 y 最小(最靠上)
+                        // 优先 KR 类; 同类中取 y 靠上(第一本书)
                         if (isKR && !bestIsKR) { best = krv; bestIsKR = YES; continue; }
-                        if (isKR == bestIsKR && krv.frame.origin.y < best.frame.origin.y) best = krv;
+                        if (isKR == bestIsKR && wy < [best convertRect:best.bounds toView:nil].origin.y) best = krv;
                     }
                     if (best) {
+                        CGRect bf = [best convertRect:best.bounds toView:nil];
                         NSString *bcls = NSStringFromClass([best class]);
-                        qqlog(@"[小说] 选定书卡 KRView=%@ frame=(%.0f,%.0f %.0fx%.0f)",
-                              bcls, best.frame.origin.x, best.frame.origin.y,
-                              best.frame.size.width, best.frame.size.height);
+                        qqlog(@"[小说] 选定书卡 KRView=%@ 屏坐标=(%.0f,%.0f %.0fx%.0f)",
+                              bcls, bf.origin.x, bf.origin.y, bf.size.width, bf.size.height);
                         if (qqfbSimulateTapOnView(best, @"小说点书KRView")) { done = YES; }
                     } else {
                         qqlog(@"[小说] 全屏扫描未找到像书卡片的 KRView(可能书城未加载/书卡片非KRView)");
@@ -4146,6 +4158,9 @@ static void qqfbScrollDownOnce(void) {
 //   · 右滑参照 v1.8.9 安全触摸, 不再向 window 生发(修闪退)
 static void qqfbDoNovelTask(void) {
     qqlog(@"[小说] 开始小说任务：点一本书 → 右滑两下 → 关容器回等级页");
+    // ★ v1.9.9 关闭抓包日志刷屏: 小说任务期间不需要 DUMP/NSURLSession 高频日志,
+    //   强制关掉 _dumpAllRequests, 避免日志爆炸(用户反馈抓包日志太频繁看着费劲)。
+    _dumpAllRequests = NO;
     // 1) 先向下滚动到「猜你喜欢」区域(v1.9.7: 书城默认显示顶部, 书卡片在下方要滚动才出现)
     [NSThread sleepForTimeInterval:3.0];
     qqlog(@"[小说] 滚动到猜你喜欢区…");

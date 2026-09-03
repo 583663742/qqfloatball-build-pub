@@ -6,6 +6,7 @@
 #import <substrate.h>
 #import <mach/mach_time.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <dlfcn.h>
 
 // ─────────────────────────────────────────────
 // QQFloatBall 浮球
@@ -3665,7 +3666,7 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
 //       走 [[UIApplication sharedApplication] sendEvent:] 完整系统分发, Kuikly 才会响应。
 // 参考: github.com/kif-framework/KIF 的 IOHIDEvent+KIF / UITouch-KIFAdditions / UIEvent+KIFAdditions。
 
-// IOHIDEvent 相关 C 函数声明(私有, 越狱环境可用)
+// IOHIDEvent 相关类型定义(私有, 越狱环境可用)
 typedef struct __IOHIDEvent * IOHIDEventRef;
 typedef double IOHIDFloat;
 typedef uint32_t IOHIDDigitizerTransducerType;
@@ -3673,21 +3674,40 @@ typedef uint32_t IOHIDEventField;
 typedef uint32_t IOHIDEventType;
 typedef uint32_t IOHIDDigitizerEventMask;
 typedef uint32_t IOOptionBits;
-extern void IOHIDEventAppendEvent(IOHIDEventRef event, IOHIDEventRef childEvent);
-extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, IOHIDEventField field, int value);
 // AbsoluteTime 系统已定义(UnsignedWide {hi,lo}), 不再重复 typedef
-// IOHIDEventCreateDigitizerFingerEventWithQuality: 创建手指触摸 HID 事件(真实触摸模拟的核心)
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
+// ↓ 关键: IOHID 4 个函数是 iOS 私有 API, 不在 SDK 链接表的 framework 里 → 直接 extern 会 linker undefined symbol。
+//   用 dlsym(RTLD_DEFAULT,...) 运行时动态解析(越狱插件标准做法), 能编译过 + 运行时一定能找到。
+typedef IOHIDEventRef (*qqfbIOHIDCreateDigitizerFingerEventWithQuality_t)(
     CFAllocatorRef allocator, AbsoluteTime timeStamp, uint32_t index, uint32_t identity,
     uint32_t eventMask, IOHIDFloat x, IOHIDFloat y, IOHIDFloat z, IOHIDFloat tipPressure,
     IOHIDFloat twist, IOHIDFloat minorRadius, IOHIDFloat majorRadius, IOHIDFloat quality,
     IOHIDFloat density, IOHIDFloat irregularity, Boolean range, Boolean touch, IOOptionBits options);
-// IOHIDEventCreateDigitizerEvent: 创建"手"级别的 HID 事件(容器)
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
+typedef IOHIDEventRef (*qqfbIOHIDCreateDigitizerEvent_t)(
     CFAllocatorRef allocator, AbsoluteTime timeStamp, IOHIDDigitizerTransducerType type,
     uint32_t index, uint32_t identity, uint32_t eventMask, uint32_t buttonMask,
     IOHIDFloat x, IOHIDFloat y, IOHIDFloat z, IOHIDFloat tipPressure, IOHIDFloat barrelPressure,
     Boolean range, Boolean touch, IOOptionBits options);
+typedef void (*qqfbIOHIDAppendEvent_t)(IOHIDEventRef event, IOHIDEventRef childEvent);
+typedef void (*qqfbIOHIDSetIntegerValue_t)(IOHIDEventRef event, IOHIDEventField field, int value);
+static qqfbIOHIDCreateDigitizerFingerEventWithQuality_t g_fingerCreate = NULL;
+static qqfbIOHIDCreateDigitizerEvent_t g_handCreate = NULL;
+static qqfbIOHIDAppendEvent_t g_append = NULL;
+static qqfbIOHIDSetIntegerValue_t g_setInt = NULL;
+static dispatch_once_t g_iohidOnce;
+static void qqfbLoadIOHID(void) {
+    dispatch_once(&g_iohidOnce, ^{
+        @try {
+            g_fingerCreate = (qqfbIOHIDCreateDigitizerFingerEventWithQuality_t)dlsym(RTLD_DEFAULT, "IOHIDEventCreateDigitizerFingerEventWithQuality");
+            g_handCreate   = (qqfbIOHIDCreateDigitizerEvent_t)dlsym(RTLD_DEFAULT, "IOHIDEventCreateDigitizerEvent");
+            g_append       = (qqfbIOHIDAppendEvent_t)dlsym(RTLD_DEFAULT, "IOHIDEventAppendEvent");
+            g_setInt       = (qqfbIOHIDSetIntegerValue_t)dlsym(RTLD_DEFAULT, "IOHIDEventSetIntegerValue");
+            qqlog(@"[IOHID] dlsym: finger=%d hand=%d append=%d setInt=%d",
+                  g_fingerCreate!=NULL, g_handCreate!=NULL, g_append!=NULL, g_setInt!=NULL);
+        } @catch (NSException *e) {
+            qqlog(@"[IOHID] dlsym异常: %@", e);
+        }
+    });
+}
 
 // IOHIDEvent types/fields(与 KIF 一致)
 enum { kKKIFHIDDigitizerTransducerTypeFinger = 2, kKKIFHIDDigitizerTransducerTypeHand = 3 };
@@ -3723,25 +3743,30 @@ enum { kKKIFHIDEventFieldDigitizerX = kKKIFHIDEventFieldBase(kKKIFHIDEventTypeDi
 @end
 
 // 构造 IOHID 手事件 + 手指事件的完整 HID 触摸(参考 kif_IOHIDEventWithTouches)
+// 用 dlsym 函数指针(g_*), 不直接 extern 调用(避开 linker undefined symbol)
 static IOHIDEventRef kkif_IOHIDEventWithTouch(UITouch *touch) {
+    qqfbLoadIOHID();
+    if (!g_handCreate || !g_fingerCreate || !g_append || !g_setInt) return NULL;
     uint64_t abTime = mach_absolute_time();
     AbsoluteTime ts; ts.hi = (UInt32)(abTime >> 32); ts.lo = (UInt32)(abTime);
     // 手级别容器事件
-    IOHIDEventRef hand = IOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, ts,
+    IOHIDEventRef hand = g_handCreate(kCFAllocatorDefault, ts,
                         kKKIFHIDDigitizerTransducerTypeHand, 0, 0,
                         kKKIFHIDDigitizerEventTouch, 0, 0, 0, 0, 0, 0, 0, true, 0);
-    IOHIDEventSetIntegerValue(hand, kKKIFHIDEventFieldDigitizerIsDisplayIntegrated, true);
+    if (!hand) return NULL;
+    g_setInt(hand, kKKIFHIDEventFieldDigitizerIsDisplayIntegrated, true);
     // 手指事件(真实触摸核心)
     uint32_t eventMask = (touch.phase == UITouchPhaseMoved) ? kKKIFHIDDigitizerEventPosition
                          : (kKKIFHIDDigitizerEventRange | kKKIFHIDDigitizerEventTouch);
     uint32_t isTouching = (touch.phase == UITouchPhaseEnded) ? 0 : 1;
     CGPoint loc = [touch locationInView:touch.window];
-    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
+    IOHIDEventRef finger = g_fingerCreate(
                         kCFAllocatorDefault, ts, 1, 2, eventMask,
                         (IOHIDFloat)loc.x, (IOHIDFloat)loc.y, 0.0, 0, 0, 5.0, 5.0, 1.0, 1.0, 1.0,
                         (Boolean)isTouching, (Boolean)isTouching, 0);
-    IOHIDEventSetIntegerValue(finger, kKKIFHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventAppendEvent(hand, finger);
+    if (!finger) { CFRelease(hand); return NULL; }
+    g_setInt(finger, kKKIFHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+    g_append(hand, finger);
     CFRelease(finger);
     return hand;
 }

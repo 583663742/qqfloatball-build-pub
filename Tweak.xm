@@ -38,7 +38,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.6"
+#define kQQFloatBallVersion @"1.9.7"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3820,16 +3820,25 @@ static BOOL qqfbTapNovelBookCard(void) {
                             CGPoint p = CGPointMake(xx, yy);
                             UIView *hit = [win hitTest:p withEvent:nil];
                             if (!hit) continue;
+                            // ★ v1.9.7 两层搜索: 优先找类名含「KR」的Kuikly渲染视图;
+                            //   若整条上层链无KR, 则兜底找「响应css_click/css_touchUp的中型非文本视图」。
+                            //   之前只认KR(书卡片可能非KR类, 扫0个) 或 只收所有css_click(误收UITextView崩)。
+                            //   现在两层都试, 但**硬排除任何UIText/文本/UIControl输入类**(绝不点文本框)。
                             UIView *kr = nil;
                             for (UIView *cur = hit; cur; cur = cur.superview) {
                                 NSString *ccls = NSStringFromClass([cur class]);
-                                // ★ v1.9.6 铁律: **只认类名含「KR」的 Kuikly 渲染视图**!
-                                //   之前用 respondsToSelector:css_click 兜底, 把普通
-                                //   UIView/UIButton/UITextView(也响应 css_click)误判成书卡片,
-                                //   尤其选中 UITextView 模拟触摸 → 闪退(日志实锤选定UITextView)。
-                                //   现在: 只有类名含 "KR"(KRView/KRRichTextView/KRList等)才算。
-                                //   普通 UIView/UIButton/UITextView 一律跳过。
                                 if ([ccls containsString:@"KR"]) { kr = cur; break; }
+                            }
+                            if (!kr) {
+                                for (UIView *cur = hit; cur; cur = cur.superview) {
+                                    NSString *ccls = NSStringFromClass([cur class]);
+                                    // 硬排除文本/输入类(绝不点UITextView等)
+                                    if ([ccls containsString:@"UIText"] || [ccls containsString:@"TextInteraction"]) continue;
+                                    if ([cur isKindOfClass:[UITextView class]] || [cur isKindOfClass:[UITextField class]]) continue;
+                                    SEL cClick = NSSelectorFromString(@"css_click");
+                                    SEL cTouch = NSSelectorFromString(@"css_touchUp");
+                                    if ([cur respondsToSelector:cClick] || [cur respondsToSelector:cTouch]) { kr = cur; break; }
+                                }
                             }
                             if (kr && ![seen containsObject:@((uintptr_t)kr)]) {
                                 [seen addObject:@((uintptr_t)kr)];
@@ -3843,9 +3852,11 @@ static BOOL qqfbTapNovelBookCard(void) {
                               NSStringFromClass([krv class]), krv.frame.origin.x, krv.frame.origin.y,
                               krv.frame.size.width, krv.frame.size.height);
                     }
-                    // 从扫到的 KRView 里选「像书卡片」的: 屏幕中下部(y>=屏高*0.4), 尺寸中等
-                    // (宽>=60 高>=60, 排除全屏容器), 优先选 y 靠上 + 带 css_click 的。
+                    // 从扫到的视图里选「像书卡片」的: 屏幕中下部(y>=屏高*0.35), 尺寸中等
+                    // (宽>=60 高>=60, 排除全屏容器), **优先选类名含KR**(书卡片多是KR类),
+                    // 再退到 y 最靠上的。
                     UIView *best = nil;
+                    BOOL bestIsKR = NO;
                     for (UIView *krv in krViews) {
                         CGRect f = krv.frame;
                         if (f.origin.y < scrSize.height * 0.35) continue;    // 只用中下部(猜你喜欢区)
@@ -3853,9 +3864,11 @@ static BOOL qqfbTapNovelBookCard(void) {
                         if (f.size.width < 60 || f.size.height < 60) continue;
                         if (f.size.width > scrSize.width * 0.95) continue;   // 排除全屏容器
                         if (f.size.height > scrSize.height * 0.9) continue;  // 排除全屏容器
-                        if (!best) { best = krv; continue; }
-                        // 选 y 最小(最靠上)的
-                        if (krv.frame.origin.y < best.frame.origin.y) best = krv;
+                        BOOL isKR = [NSStringFromClass([krv class]) containsString:@"KR"];
+                        if (!best) { best = krv; bestIsKR = isKR; continue; }
+                        // 优先 KR 类; 同类中取 y 最小(最靠上)
+                        if (isKR && !bestIsKR) { best = krv; bestIsKR = YES; continue; }
+                        if (isKR == bestIsKR && krv.frame.origin.y < best.frame.origin.y) best = krv;
                     }
                     if (best) {
                         NSString *bcls = NSStringFromClass([best class]);
@@ -3949,6 +3962,50 @@ static BOOL qqfbSwipeRightToFlip(void) {
     return done;
 }
 
+// ── v1.9.7 小说书城向下滚动到「猜你喜欢」──
+// 用户截图: 书城打开默认显示顶部(搜索/分类/推荐榜), 「猜你喜欢」书卡片在下方要滚动才出现。
+// 之前扫描只看到顶部UI(搜索框/tab), 收不到下方书卡片 → 一直点不到。
+// 本函数: 找当前可见的 UIScrollView/UICollectionView(或任何有 contentOffset 的滚动容器),
+// 编程 setContentOffset 向下滚一段(安全, 不模拟手势), 让「猜你喜欢」书卡片露出。
+static void qqfbScrollDownOnce(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            __block UIScrollView *targetSV = nil;
+            __block BOOL found = NO;
+            // 遍历所有窗口, 找「当前最顶层的、可见的、能滚动的」容器
+            for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                if (win.hidden || win.alpha <= 0.05) continue;
+                NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+                while (stack.count > 0) {
+                    UIView *v = stack.lastObject;
+                    [stack removeLastObject];
+                    if ([v isKindOfClass:[UIScrollView class]]) {
+                        UIScrollView *sv = (UIScrollView *)v;
+                        if (sv.contentSize.height > sv.bounds.size.height && sv.alpha > 0.1 && !sv.hidden) {
+                            targetSV = sv; found = YES; break;
+                        }
+                    }
+                    for (UIView *sub in v.subviews) { [stack addObject:sub]; }
+                }
+                if (found) break;
+            }
+            if (targetSV) {
+                CGFloat maxOffset = targetSV.contentSize.height - targetSV.bounds.size.height;
+                CGPoint cur = targetSV.contentOffset;
+                CGFloat newY = MIN(cur.y + 500, MAX(maxOffset, 0));
+                [targetSV setContentOffset:CGPointMake(cur.x, newY) animated:YES];
+                qqlog(@"[小说] 向下滚动到猜你喜欢 offset.y=%.0f→%.0f (max=%.0f)",
+                      cur.y, newY, maxOffset);
+            } else {
+                qqlog(@"[小说] 未找到可滚动容器(书城可能非UIScrollView)");
+            }
+        } @catch (NSException *e) {
+            qqlog(@"[小说] 滚动异常: %@", e);
+        }
+    });
+    [NSThread sleepForTimeInterval:1.0];
+}
+
 // ── v1.9.1 小说任务主流程：点书 → 右滑两下 → 关闭回等级页 ──
 // 用户实测要求：进书城「猜你喜欢」点一本 → 进去右滑两下翻页 → 返回等级页。
 // 关键改进(v1.9.1)：
@@ -3957,13 +4014,20 @@ static BOOL qqfbSwipeRightToFlip(void) {
 //   · 右滑参照 v1.8.9 安全触摸, 不再向 window 生发(修闪退)
 static void qqfbDoNovelTask(void) {
     qqlog(@"[小说] 开始小说任务：点一本书 → 右滑两下 → 关容器回等级页");
-    // 1) 等书城加载, 多轮尝试点「猜你喜欢」书卡片
+    // 1) 先向下滚动到「猜你喜欢」区域(v1.9.7: 书城默认显示顶部, 书卡片在下方要滚动才出现)
+    [NSThread sleepForTimeInterval:3.0];
+    qqlog(@"[小说] 滚动到猜你喜欢区…");
+    qqfbScrollDownOnce();
+    [NSThread sleepForTimeInterval:2.0];
+    // 2) 等书城加载, 多轮尝试点「猜你喜欢」书卡片
     //   v1.9.6: 延长时间(书城Kuikly加载慢, 之前2秒不够, scan 只扫到占位UIView无书KRView)。
     //   改为每轮3秒×5轮=15秒, 等书城渲染出书卡片KRView。
     BOOL tapped = NO;
     for (int i = 0; i < 5; i++) {
         [NSThread sleepForTimeInterval:3.0];
         if (qqfbTapNovelBookCard()) { tapped = YES; break; }
+        // 每轮多滚一次(书卡片可能要继续往下滚才露出)
+        if (i < 4) { qqfbScrollDownOnce(); }
         qqlog(@"[小说] 第%d轮未扫到书KRView, 继续等待…", i+1);
     }
     if (!tapped) {
@@ -4164,6 +4228,15 @@ static void autoTapNativeUI(void) {
                 NSString *t = item[@"title"];
                 for (NSString *kw in kws) {
                     if ([t containsString:kw]) {
+                        // ★ v1.9.7 修「发表设置」误点: 用户实测粘贴文字后点到了下面的「发表设置」
+                        //   而不是右上角「发表」。「发表设置」标题含「发表」被关键词匹配到,
+                        //   且排在前面. 修复: 匹配「发表/发布/发送」时, 排除标题含「设置/选项/管理/工具栏」的
+                        //   (那些是设置入口不是发表按钮)。
+                        NSString *lc = [t lowercaseString];
+                        BOOL isSetting = [lc containsString:@"设置"] || [lc containsString:@"选项"] || [lc containsString:@"管理"];
+                        if (isSetting && ([kw containsString:@"发表"] || [kw containsString:@"发布"] || [kw containsString:@"发送"])) {
+                            continue;   // 跳过发表设置, 不点
+                        }
                         UIControl *btn = item[@"btn"];
                         if (btn.hidden == NO && btn.alpha > 0.1) {
                             // v1.8.5: Kuikly 组件优先——直接调 css_click/css_touchUp block

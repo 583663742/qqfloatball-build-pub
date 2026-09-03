@@ -4,6 +4,8 @@
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
 #import <substrate.h>
+#import <mach/mach_time.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 // ─────────────────────────────────────────────
 // QQFloatBall 浮球
@@ -38,7 +40,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.7"
+#define kQQFloatBallVersion @"1.9.8"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3655,8 +3657,130 @@ static BOOL qqfbGestureInvoke(UIGestureRecognizer *g, NSString *logTag) {
 //   —— 这是 Kuikly 自己的触摸响应路径, 跟真人手指点击完全一致。
 // 因此只需构造 UITouch+UIEvent 发给目标 view, Kuikly 必然响应, 不需要
 // 猜手势/调 block/触发 target/action（v1.8.3~v1.8.8 全部绕路失败史）。
-// 构造方法: UITouch 用 KVC 设私有 ivar(_phase/_window/_view/_locationInWindow
-//   /_timestamp/_tapCount), UIEvent 用 UITouchesEvent 私有类 + _addTouch:。
+// ── v1.9.8 模拟触摸点 Kuikly 组件: 改用 KIF 的 IOHIDEvent 注入(FakeTools/官方KIF框架的方案)──
+// 背景: 旧版(qqfbSimulateTapOnView)直接 [view touchesBegan:], 绕过系统 sendEvent: 完整分发链,
+//       且用 KVC setValue 设 UITouch 私有 ivar——当前 iOS 的 UITouch 没有这些 ivar(报 not key value
+//       coding-compliant for key _view), Kuikly 完全不认 → 点不中书卡片。
+// 正解(KIF 开源的 tapAtPoint, 已被 Faketools 验证): 用 IOHIDEvent 构造**真实手指级触摸**,
+//       走 [[UIApplication sharedApplication] sendEvent:] 完整系统分发, Kuikly 才会响应。
+// 参考: github.com/kif-framework/KIF 的 IOHIDEvent+KIF / UITouch-KIFAdditions / UIEvent+KIFAdditions。
+
+// IOHIDEvent 相关 C 函数声明(私有, 越狱环境可用)
+typedef struct __IOHIDEvent * IOHIDEventRef;
+typedef double IOHIDFloat;
+typedef uint32_t IOHIDDigitizerTransducerType;
+typedef uint32_t IOHIDEventField;
+typedef uint32_t IOHIDEventType;
+typedef uint32_t IOHIDDigitizerEventMask;
+extern void IOHIDEventAppendEvent(IOHIDEventRef event, IOHIDEventRef childEvent);
+extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, IOHIDEventField field, int value);
+typedef struct { UInt32 hi; UInt32 lo; } AbsoluteTime;
+// IOHIDEventCreateDigitizerFingerEventWithQuality: 创建手指触摸 HID 事件(真实触摸模拟的核心)
+extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
+    CFAllocatorRef allocator, AbsoluteTime timeStamp, uint32_t index, uint32_t identity,
+    uint32_t eventMask, IOHIDFloat x, IOHIDFloat y, IOHIDFloat z, IOHIDFloat tipPressure,
+    IOHIDFloat twist, IOHIDFloat minorRadius, IOHIDFloat majorRadius, IOHIDFloat quality,
+    IOHIDFloat density, IOHIDFloat irregularity, Boolean range, Boolean touch, IOOptionBits options);
+// IOHIDEventCreateDigitizerEvent: 创建"手"级别的 HID 事件(容器)
+extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
+    CFAllocatorRef allocator, AbsoluteTime timeStamp, IOHIDDigitizerTransducerType type,
+    uint32_t index, uint32_t identity, uint32_t eventMask, uint32_t buttonMask,
+    IOHIDFloat x, IOHIDFloat y, IOHIDFloat z, IOHIDFloat tipPressure, IOHIDFloat barrelPressure,
+    Boolean range, Boolean touch, IOOptionBits options);
+
+// IOHIDEvent types/fields(与 KIF 一致)
+enum { kKKIFHIDDigitizerTransducerTypeFinger = 2, kKKIFHIDDigitizerTransducerTypeHand = 3 };
+enum { kKKIFHIDDigitizerEventRange = 0x00000001, kKKIFHIDDigitizerEventTouch = 0x00000002,
+       kKKIFHIDDigitizerEventPosition = 0x00000004 };
+#define KIF_HIDEventFieldBase(t) ((t) << 16)
+enum { kKKIFHIDEventTypeDigitizer = 11 };
+enum { kKKIFHIDEventFieldDigitizerX = KIF_HIDEventFieldBase(kKKIFHIDEventTypeDigitizer),
+       kKKIFHIDEventFieldDigitizerY,
+       kKKIFHIDEventFieldDigitizerIsDisplayIntegrated = kKKIFHIDEventFieldBase(kKKIFHIDEventTypeDigitizer) + 25 };
+
+// UITouch 私有方法声明(KIF 用真实 setter, 非 setValue——这是关键)
+@interface UITouch (KKIFSimulate)
+- (void)setWindow:(UIWindow *)window;
+- (void)setView:(UIView *)view;
+- (void)setTapCount:(NSUInteger)tapCount;
+- (void)setTimestamp:(NSTimeInterval)timestamp;
+- (void)setPhase:(UITouchPhase)phase;
+- (void)setPhaseAndUpdateTimestamp:(UITouchPhase)phase;
+- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)resetPrevious;
+- (void)_setIsFirstTouchForView:(BOOL)firstTouchForView;
+- (void)_setHidEvent:(IOHIDEventRef)event;
+@end
+// UIEvent 私有方法声明
+@interface UIEvent (KKIFSimulate)
+- (void)_setHIDEvent:(IOHIDEventRef)event;
+- (void)_clearTouches;
+- (void)_addTouch:(id)touch forDelayedDelivery:(BOOL)delayed;
+@end
+// UIApplication 私有接口
+@interface UIApplication (KKIFSimulate)
+- (UIEvent *)_touchesEvent;
+@end
+
+// 构造 IOHID 手事件 + 手指事件的完整 HID 触摸(参考 kif_IOHIDEventWithTouches)
+static IOHIDEventRef kkif_IOHIDEventWithTouch(UITouch *touch) {
+    uint64_t abTime = mach_absolute_time();
+    AbsoluteTime ts; ts.hi = (UInt32)(abTime >> 32); ts.lo = (UInt32)(abTime);
+    // 手级别容器事件
+    IOHIDEventRef hand = IOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, ts,
+                        kKKIFHIDDigitizerTransducerTypeHand, 0, 0,
+                        kKKIFHIDDigitizerEventTouch, 0, 0, 0, 0, 0, 0, 0, true, 0);
+    IOHIDEventSetIntegerValue(hand, kKKIFHIDEventFieldDigitizerIsDisplayIntegrated, true);
+    // 手指事件(真实触摸核心)
+    uint32_t eventMask = (touch.phase == UITouchPhaseMoved) ? kKKIFHIDDigitizerEventPosition
+                         : (kKKIFHIDDigitizerEventRange | kKKIFHIDDigitizerEventTouch);
+    uint32_t isTouching = (touch.phase == UITouchPhaseEnded) ? 0 : 1;
+    CGPoint loc = [touch locationInView:touch.window];
+    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
+                        kCFAllocatorDefault, ts, 1, 2, eventMask,
+                        (IOHIDFloat)loc.x, (IOHIDFloat)loc.y, 0.0, 0, 0, 5.0, 5.0, 1.0, 1.0, 1.0,
+                        (Boolean)isTouching, (Boolean)isTouching, 0);
+    IOHIDEventSetIntegerValue(finger, kKKIFHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+    IOHIDEventAppendEvent(hand, finger);
+    CFRelease(finger);
+    return hand;
+}
+
+// 构造一个 UITouch(参考 KIF initAtPoint:inWindow:)—— 用真实 setter, 设 IOHIDEvent
+static UITouch *kkif_NewTouchAtPoint(CGPoint point, UIWindow *window) {
+    UITouch *touch = [[UITouch alloc] init];
+    if (!touch) return nil;
+    [touch setWindow:window];                       // 必须先设 window
+    [touch setTapCount:1];
+    [touch _setLocationInWindow:point resetPrevious:YES];
+    UIView *hit = [window hitTest:point withEvent:nil];
+    [touch setView:hit];
+    [touch setPhase:UITouchPhaseBegan];
+    @try { [touch _setIsFirstTouchForView:YES]; } @catch (NSException *e) {}
+    [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+    @try {
+        IOHIDEventRef hid = kkif_IOHIDEventWithTouch(touch);
+        [touch _setHidEvent:hid];
+        CFRelease(hid);
+    } @catch (NSException *e) {}
+    return touch;
+}
+
+// 构造 UIEvent(参考 KIF eventWithTouches:)—— 走 _touchesEvent + kif_setIOHIDEvent 私有接口
+static UIEvent *kkif_EventWithTouch(UITouch *touch) {
+    UIApplication *app = [UIApplication sharedApplication];
+    UIEvent *event = [app _touchesEvent];
+    [event _clearTouches];
+    @try {
+        IOHIDEventRef hid = kkif_IOHIDEventWithTouch(touch);
+        [event _setHIDEvent:hid];
+        CFRelease(hid);
+    } @catch (NSException *e) {}
+    @try { [event _addTouch:touch forDelayedDelivery:NO]; } @catch (NSException *e) {}
+    return event;
+}
+
+// ── v1.9.8 核心: 用手级 IOHIDEvent 注入模拟一次点击(完整 began→ended, 走系统 sendEvent)──
+// 这是 FakeTools/KIF 点中 Kuikly 的方案。返回 YES=已发送完整序列。
 static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
     @try {
         if (!view || view.window == nil) return NO;
@@ -3664,41 +3788,23 @@ static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
         CGPoint center = [view convertPoint:CGPointMake(CGRectGetMidX(view.bounds),
                                                         CGRectGetMidY(view.bounds))
                                     toView:window];
-        Class touchCls = NSClassFromString(@"UITouch");
-        if (!touchCls) return NO;
-        id touch = [[touchCls alloc] init];
-        // ★ v1.9.2 关键修复: 私有 ivar 每个**单独套 @try**!
-        //   实锤: 当前 iOS 的 UITouch **没有 _view ivar**, 直接 [touch setValue:view forKey:@"_view"]
-        //   抛 setValue:forUndefinedKey: not key value coding-compliant for key _view,
-        //   导致整个 @try 中断 → 后面的 [view touchesBegan...](真正让触摸生效的一步)永远不执行 → 点书失败!
-        //   现在每个 ivar 崩了都跳过, 确保 [view touchesBegan] 一定能跑到。
-        @try { [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"]; } @catch (NSException *e) {}
-        @try { [touch setValue:@(1) forKey:@"_tapCount"]; } @catch (NSException *e) {}
-        @try { [touch setValue:window forKey:@"_window"]; } @catch (NSException *e) {}
-        @try { [touch setValue:view forKey:@"_view"]; } @catch (NSException *e) {}
-        @try { [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
-        @try { [touch setValue:[NSNumber numberWithDouble:[[NSProcessInfo processInfo] systemUptime]] forKey:@"_timestamp"]; } @catch (NSException *e) {}
-        // UITouchesEvent 私有类 + _addTouch:forDelayedDelivery: 构造事件
-        Class evCls = NSClassFromString(@"UITouchesEvent");
-        id event = [[evCls alloc] init];
-        SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
-        if (event && addSel && [event respondsToSelector:addSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [event performSelector:addSel withObject:touch withObject:@NO];
-#pragma clang diagnostic pop
-        }
-        NSSet *touchSet = [NSSet setWithObject:touch];
-        // 完整触摸序列: began -> ended（Kuikly 需要 touchDown 先于 touchUp）
-        // 触摸直接发给 view——即使上面 ivar 全失败, 这里仍能让 Kuikly 响应。
-        [view touchesBegan:touchSet withEvent:event];
-        @try { [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"]; } @catch (NSException *e) {}
-        [view touchesEnded:touchSet withEvent:event];
-        qqlog(@"[autotap] %@: %@ 模拟触摸(%.0f,%.0f)", logTag,
+        // 1) 构造 began 触摸并发送
+        UITouch *touch = kkif_NewTouchAtPoint(center, window);
+        if (!touch) return NO;
+        [touch setPhase:UITouchPhaseBegan];
+        [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+        UIEvent *beganEvent = kkif_EventWithTouch(touch);
+        [[UIApplication sharedApplication] sendEvent:beganEvent];
+        // 2) 构造 ended 触摸并发送
+        [touch setPhase:UITouchPhaseEnded];
+        [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+        UIEvent *endedEvent = kkif_EventWithTouch(touch);
+        [[UIApplication sharedApplication] sendEvent:endedEvent];
+        qqlog(@"[autotap] %@: %@ IOHID注入点击(%.0f,%.0f)", logTag,
               NSStringFromClass([view class]), center.x, center.y);
         return YES;
     } @catch (NSException *e) {
-        qqlog(@"[autotap] 模拟触摸异常(%@): %@", logTag, e);
+        qqlog(@"[autotap] IOHID注入异常(%@): %@", logTag, e);
         return NO;
     }
 }

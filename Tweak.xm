@@ -41,7 +41,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.12"
+#define kQQFloatBallVersion @"1.9.13"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -131,6 +131,15 @@ static void qqlog(NSString *fmt, ...) {
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
+    // ★ v1.9.13 日志降噪: 过滤高频/**诊断无用**的日志前缀, 不写文件也不刷面板。
+    //   [DUMP]/[KRHttp]/[dump] = 抓包噪音; [KuiklyView]/[KuiklyVC]/[Kuikly] = Kuikly 页面生命周期
+    //   日志(纯诊断, Hook 里还 %orig 照常跑, 只是不打日志)。这些占了 90% 日志量, 看去非常乱。
+    if (msg.length > 0) {
+        NSArray *noisy = @[@"[DUMP]", @"[KRHttp]", @"[dump]", @"[KuiklyView]", @"[KuiklyVC]", @"[Kuikly]", @"[NSURLSession]"];
+        for (NSString *np in noisy) {
+            if ([msg containsString:np]) return;   // 噪音直接丢弃
+        }
+    }
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:qqlogPath()];
     if (!fh) {
         [[NSFileManager defaultManager] createFileAtPath:qqlogPath() contents:nil attributes:nil];
@@ -4249,6 +4258,11 @@ static BOOL qqfbKuiklyInvoke(UIView *view, id block, NSString *logTag) {
 // ── 递归收集可点击的原生按钮 + 可输入文本框 ──
 static void collectNativeActionsInView(UIView *view, NSMutableArray *buttons, NSMutableArray *textViews) {
     if (!view) return;
+    // ★ v1.9.13 排除悬浮球自己的窗口: 若 view 属于 _floatWindow(悬浮球面板),
+    //   直接跳过, 不收集其按钮。否则所有自动点击(视频关闭/说说发表等)会把
+    //   悬浮球面板上的「✕/关闭」等按钮当成目标点了(用户实测: 视频任务点X关闭,
+    //   却一直在关自己的面板)。这是彻底修复。
+    if (_floatWindow && view.window == _floatWindow) return;
     // v1.7.9: 从「只收 UIButton」放宽为「收所有 UIControl」——QQ 空间说说的「发表」
     // 在导航栏右上角，是 UIBarButtonItem 内部视图（_UIButtonBarButton 继承 UIControl
     // 而非 UIButton），旧代码收集不到 → 「原生点击: 发表」从未出现 → 任务失败
@@ -4530,7 +4544,12 @@ static void qqfbTapCloseButton(void) {
             CGSize scrSize = [UIScreen mainScreen].bounds.size;
             NSMutableArray *buttons = [NSMutableArray array];
             NSMutableArray *textViews = [NSMutableArray array];
+            // ★ v1.9.13 修「关闭到面板」: 遍历所有窗口收集按钮时, **跳过悬浮球自己的窗口**(_floatWindow)!
+            //   否则把悬浮球面板上的「✕/关闭」按钮也收集进来, 位置又满足右上角/顶部,
+            //   就把自己的面板关了(用户实测: 视频任务点X关闭 却一直在关自己的面板)。
+            //   collectNativeActionsInView 收集时, 遇到 _floatWindow 直接跳过(含其子视图)。
             for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                if (win == _floatWindow) continue;   // 跳过悬浮球自己的窗口
                 collectNativeActionsInView(win, buttons, textViews);
             }
             // 1) 标题含 关闭/X/×/取消（视频广告页关闭按钮常见）

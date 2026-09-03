@@ -41,7 +41,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.10"
+#define kQQFloatBallVersion @"1.9.11"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -3835,6 +3835,31 @@ static BOOL qqfbSimulateTapOnView(UIView *view, NSString *logTag) {
     }
 }
 
+// ── v1.9.11 按屏幕坐标直接模拟点击(借鉴连点器/FakeTools 的 tapAtPoint)──
+// 不再扫描视图/筛选(那套太依赖书城布局, 选不中), 直接按屏幕坐标点「猜你喜欢」书卡片。
+// 用 KIF IOHID 注入完整 began→ended, 走系统 sendEvent。
+static BOOL kkif_TapAtScreenPoint(CGPoint point, NSString *logTag) {
+    @try {
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        if (!window) return NO;
+        UITouch *touch = kkif_NewTouchAtPoint(point, window);
+        if (!touch) return NO;
+        [touch setPhase:UITouchPhaseBegan];
+        [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+        UIEvent *beganEvent = kkif_EventWithTouch(touch);
+        [[UIApplication sharedApplication] sendEvent:beganEvent];
+        [touch setPhase:UITouchPhaseEnded];
+        [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+        UIEvent *endedEvent = kkif_EventWithTouch(touch);
+        [[UIApplication sharedApplication] sendEvent:endedEvent];
+        qqlog(@"[点击] %@ tap(%.0f,%.0f)", logTag, point.x, point.y);
+        return YES;
+    } @catch (NSException *e) {
+        qqlog(@"[点击] 异常(%@): %@", logTag, e);
+        return NO;
+    }
+}
+
 // ── v1.9.0 小说任务专用：点「猜你喜欢」任意一本大书卡片 ──
 // 问题：小说书城是 Kuikly 原生渲染，书卡片是「无标题的 Kuikly 手势组件」，
 //       autoTapNativeUI 靠关键词匹配（签到/打卡/领取）永远命中不了书卡片，
@@ -4021,14 +4046,15 @@ static BOOL qqfbTapNovelBookCard(void) {
                     if (best) {
                         CGRect bf = [best convertRect:best.bounds toView:nil];
                         NSString *bcls = NSStringFromClass([best class]);
-                        qqlog(@"[小说] 选定书卡 KRView=%@ 屏坐标=(%.0f,%.0f %.0fx%.0f)",
-                              bcls, bf.origin.x, bf.origin.y, bf.size.width, bf.size.height);
-                        // ★ v1.9.10 只有点中的是**真正的 KrasyView/Kuikly 书卡片**才认定进书(done=YES)。
-                        //   之前点到 330x480 普通 UIView 容器也算 done=YES → qqfbDoNovelTask 误认为"进书"
-                        //   然后右滑 → 在书城页右滑闪退。现在非 KR 类点中不算进书(不右滑, 防崩)。
+                        // 取书卡片的屏幕中心坐标, 用 kkif_TapAtScreenPoint 按坐标点(连点器方式)
+                        CGPoint centerPoint = CGPointMake(CGRectGetMidX(bf), CGRectGetMidY(bf));
+                        qqlog(@"[小说] 选中 %@ 屏幕中心=(%.0f,%.0f) f=(%.0f,%.0f %.0fx%.0f)",
+                              bcls, centerPoint.x, centerPoint.y,
+                              bf.origin.x, bf.origin.y, bf.size.width, bf.size.height);
+                        // 只有 KR 类(真正的书卡片)才认定进书, 非KR类点中不算(防误进书右滑崩)
                         BOOL targetIsKR = [bcls containsString:@"KR"];
-                        if (qqfbSimulateTapOnView(best, @"小说点书KRView")) {
-                            done = targetIsKR;   // 只有 KR 类才算点中
+                        if (kkif_TapAtScreenPoint(centerPoint, @"小说点书KRView")) {
+                            done = targetIsKR;
                         }
                     } else {
                         qqlog(@"[小说] 全屏扫描未找到像书卡片的 KRView(可能书城未加载/书卡片非KRView)");
@@ -4146,7 +4172,8 @@ static void qqfbScrollDownOnce(void) {
             if (targetSV) {
                 CGFloat maxOffset = targetSV.contentSize.height - targetSV.bounds.size.height;
                 CGPoint cur = targetSV.contentOffset;
-                CGFloat newY = MIN(cur.y + 800, MAX(maxOffset, 0));
+                // v1.9.11 一次滚到底(maxOffset), 确保「猜你喜欢」书卡片完全露出(否则扫不到)
+                CGFloat newY = maxOffset;
                 [targetSV setContentOffset:CGPointMake(cur.x, newY) animated:YES];
                 qqlog(@"[小说] 向下滚动到猜你喜欢 offset.y=%.0f→%.0f (max=%.0f)",
                       cur.y, newY, maxOffset);

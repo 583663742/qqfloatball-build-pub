@@ -3672,9 +3672,10 @@ typedef uint32_t IOHIDDigitizerTransducerType;
 typedef uint32_t IOHIDEventField;
 typedef uint32_t IOHIDEventType;
 typedef uint32_t IOHIDDigitizerEventMask;
+typedef uint32_t IOOptionBits;
 extern void IOHIDEventAppendEvent(IOHIDEventRef event, IOHIDEventRef childEvent);
 extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, IOHIDEventField field, int value);
-typedef struct { UInt32 hi; UInt32 lo; } AbsoluteTime;
+// AbsoluteTime 系统已定义(UnsignedWide {hi,lo}), 不再重复 typedef
 // IOHIDEventCreateDigitizerFingerEventWithQuality: 创建手指触摸 HID 事件(真实触摸模拟的核心)
 extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
     CFAllocatorRef allocator, AbsoluteTime timeStamp, uint32_t index, uint32_t identity,
@@ -3692,9 +3693,9 @@ extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
 enum { kKKIFHIDDigitizerTransducerTypeFinger = 2, kKKIFHIDDigitizerTransducerTypeHand = 3 };
 enum { kKKIFHIDDigitizerEventRange = 0x00000001, kKKIFHIDDigitizerEventTouch = 0x00000002,
        kKKIFHIDDigitizerEventPosition = 0x00000004 };
-#define KIF_HIDEventFieldBase(t) ((t) << 16)
+#define kKKIFHIDEventFieldBase(t) ((t) << 16)
 enum { kKKIFHIDEventTypeDigitizer = 11 };
-enum { kKKIFHIDEventFieldDigitizerX = KIF_HIDEventFieldBase(kKKIFHIDEventTypeDigitizer),
+enum { kKKIFHIDEventFieldDigitizerX = kKKIFHIDEventFieldBase(kKKIFHIDEventTypeDigitizer),
        kKKIFHIDEventFieldDigitizerY,
        kKKIFHIDEventFieldDigitizerIsDisplayIntegrated = kKKIFHIDEventFieldBase(kKKIFHIDEventTypeDigitizer) + 25 };
 

@@ -41,7 +41,7 @@
 //   · 「🔍 获取任务」改为实时获取：自动开抓包+打开等级页额外活跃tab，等新 0x9172 后自动刷新面板
 //   · 显示额外活跃天数组全部任务（付费/已完成/无跳转都显示，不过滤）——用户需求「实时获取所有任务不管能不能做」
 //   · 版本号显示修复：面板标题显示真实版本（此前硬编码 v1.6.6 误导）
-#define kQQFloatBallVersion @"1.9.11"
+#define kQQFloatBallVersion @"1.9.12"
 
 // v1.2.22: _Block_signature 探测 block 真实签名（只读，不调用）
 // 声明在 libffi/Block.h 内（BlocksRuntime 提供），需显式声明供本文件使用
@@ -4077,62 +4077,41 @@ static BOOL qqfbTapNovelBookCard(void) {
 //   · 主线程内**不 sleep**(改为 touch._timestamp 递增模拟滑动时间, 不阻塞 UI)
 //   · 完整序列 began → moved×6 → ended
 // 找不到可见渲染视图时返回 NO(不硬滑, 避免误触返回/菜单)。
+// ── v1.9.12 右滑翻页改 KIF IOHID 注入(和点书相同机制, 修进书后右滑闪退)──
+// 旧版右滑用 KVC setValue:forKey:@"_phase" 构造 UITouch + [target touchesBegan] 直接发,
+// 在 Kuikly 阅读页会崩(进书后右滑第1下闪退, 日志实锤)。改成和点书一样的 KIF IOHID 注入:
+// 用 kkif_NewTouchAtPoint(构造带HIDEvent的真实UITouch) + kkif_EventWithTouch(走系统sendEvent),
+// 做 began→moved×N→ended 完整滑动序列。
 static BOOL qqfbSwipeRightToFlip(void) {
     __block BOOL done = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             UIWindow *win = [UIApplication sharedApplication].keyWindow;
             if (!win) return;
-            // 找 keyWindow 最顶层的可见渲染视图(当前显示页), 触摸发给它而不是 window
-            UIView *target = nil;
-            for (UIView *sub in win.subviews) {
-                if (sub.frame.size.width > 50 && sub.frame.size.height > 50 && sub.alpha > 0.1 && !sub.hidden) {
-                    target = sub;
-                    break;
-                }
-            }
-            if (!target) target = win;
             CGSize scr = [UIScreen mainScreen].bounds.size;
-            CGFloat startX = scr.width * 0.8;   // 起点: 屏幕右侧 1/4
-            CGFloat endX   = scr.width * 0.2;   // 终点: 屏幕左侧 1/4
-            CGFloat y      = scr.height * 0.5;  // 高度中部
-            Class touchCls = NSClassFromString(@"UITouch");
-            if (!touchCls) return;
-            id touch = [[touchCls alloc] init];
-            double t0 = [[NSProcessInfo processInfo] systemUptime];
-            // ★ v1.9.2: 每个 KVC ivar **单独 @try**(当前 iOS UITouch 没有 _view/_window ivar,
-            //   直接 setValue 抛 not key value coding-compliant 中断流程)。崩了照样继续,
-            //   确保下方 [target touchesBegan...] 触摸序列一定能执行(真正翻页的一步)。
-            @try { [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"]; } @catch (NSException *e) {}
-            @try { [touch setValue:@(1) forKey:@"_tapCount"]; } @catch (NSException *e) {}
-            @try { [touch setValue:win forKey:@"_window"]; } @catch (NSException *e) {}
-            @try { [touch setValue:target forKey:@"_view"]; } @catch (NSException *e) {}
-            @try { [touch setValue:[NSValue valueWithCGPoint:CGPointMake(startX, y)] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
-            @try { [touch setValue:[NSNumber numberWithDouble:t0] forKey:@"_timestamp"]; } @catch (NSException *e) {}
-            Class evCls = NSClassFromString(@"UITouchesEvent");
-            id event = [[evCls alloc] init];
-            SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
-            if (event && addSel && [event respondsToSelector:addSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [event performSelector:addSel withObject:touch withObject:@NO];
-#pragma clang diagnostic pop
-            }
-            NSSet *touchSet = [NSSet setWithObject:touch];
-            [target touchesBegan:touchSet withEvent:event];
-            // 分 6 步移动, 用 _timestamp 递增模拟滑动时间(不真实 sleep, 不阻塞主线程)
+            CGFloat startX = scr.width * 0.8;   // 起点: 屏幕右侧 → 向左滑
+            CGFloat endX   = scr.width * 0.2;
+            CGFloat y      = scr.height * 0.5;
+            // 构造 began 触摸(带IohidEvent)
+            UITouch *touch = kkif_NewTouchAtPoint(CGPointMake(startX, y), win);
+            if (!touch) return;
+            [touch setPhase:UITouchPhaseBegan];
+            [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+            [[UIApplication sharedApplication] sendEvent:kkif_EventWithTouch(touch)];
+            // 分 6 步 moved(改 location + phase), 每步 sendEvent
             for (int i = 1; i <= 6; i++) {
                 CGFloat fx = startX - (startX - endX) * i / 6.0;
-                @try { [touch setValue:@(UITouchPhaseMoved) forKey:@"_phase"]; } @catch (NSException *e) {}
-                @try { [touch setValue:[NSValue valueWithCGPoint:CGPointMake(fx, y)] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
-                @try { [touch setValue:[NSNumber numberWithDouble:t0 + i * 0.02] forKey:@"_timestamp"]; } @catch (NSException *e) {}
-                [target touchesMoved:touchSet withEvent:event];
+                @try { [touch _setLocationInWindow:CGPointMake(fx, y) resetPrevious:NO]; } @catch (NSException *e) {}
+                @try { [touch setPhase:UITouchPhaseMoved]; } @catch (NSException *e) {}
+                [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+                [[UIApplication sharedApplication] sendEvent:kkif_EventWithTouch(touch)];
             }
-            @try { [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"]; } @catch (NSException *e) {}
-            @try { [touch setValue:[NSValue valueWithCGPoint:CGPointMake(endX, y)] forKey:@"_locationInWindow"]; } @catch (NSException *e) {}
-            @try { [touch setValue:[NSNumber numberWithDouble:t0 + 0.15] forKey:@"_timestamp"]; } @catch (NSException *e) {}
-            [target touchesEnded:touchSet withEvent:event];
-            qqlog(@"[小说] 右滑翻页完成(触发视图:%@)", NSStringFromClass([target class]));
+            // ended(松开)
+            @try { [touch _setLocationInWindow:CGPointMake(endX, y) resetPrevious:NO]; } @catch (NSException *e) {}
+            @try { [touch setPhase:UITouchPhaseEnded]; } @catch (NSException *e) {}
+            [touch setTimestamp:[[NSProcessInfo processInfo] systemUptime]];
+            [[UIApplication sharedApplication] sendEvent:kkif_EventWithTouch(touch)];
+            qqlog(@"[小说] 右滑翻页完成(KIF IOHID滑动 %.0f→%.0f)", startX, endX);
             done = YES;
         } @catch (NSException *e) {
             qqlog(@"[小说] 右滑异常: %@", e);

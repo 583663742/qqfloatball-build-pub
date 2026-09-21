@@ -4,8 +4,8 @@ INSTALL_TARGET_PROCESSES = ShellPlayer
 
 APPLICATION_NAME = ShellPlayer
 ShellPlayer_FILES = main.m
-ShellPlayer_FRAMEWORKS = UIKit AVKit AVFoundation CoreGraphics Foundation
-ShellPlayer_CFLAGS = -fobjc-arc -Wall
+ShellPlayer_FRAMEWORKS = UIKit AVKit AVFoundation CoreGraphics Foundation UniformTypeIdentifiers
+ShellPlayer_CFLAGS = -fobjc-arc
 ShellPlayer_CODESIGN_FLAGS = -S
 
 include $(THEOS)/makefiles/common.mk

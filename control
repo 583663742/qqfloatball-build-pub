@@ -1,8 +1,8 @@
-Package: com.example.qqfloatball
-Name: QQFloatBall
-Version: 1.6.6
-Description: QQFloatBall 1.6.6 一键自动任务(日签卡/加好友/金币兑换 HTTP直调)+0x9172状态回查
-Depends: mobilesubstrate
-Maintainer: 傘
-Section: Tweaks
-Architecture: iphoneos-arm64e
+Package: com.minis.shellplayer
+Name: ShellPlayer
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 空壳视频播放器 (shell video player)
+Maintainer: minis
+Author: minis
+Section: Applications

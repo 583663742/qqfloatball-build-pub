@@ -6,6 +6,10 @@
 #import <UIKit/UIKit.h>
 #import <AVKit/AVKit.h>
 #import <AVFoundation/AVFoundation.h>
+#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#define SP_HAS_UTTYPE 1
+#endif
 
 static NSArray<NSString *> *SPVideoExtensions(void) {
     static NSArray *exts = nil;
@@ -181,7 +185,9 @@ static NSString *SPHumanSize(unsigned long long bytes) {
     }
 
     [self.items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        return [b[@"date"] compare:a[@"date"]];
+        NSDate *da = (NSDate *)a[@"date"];
+        NSDate *db = (NSDate *)b[@"date"];
+        return (NSComparisonResult)[db compare:da];
     }];
 
     self.emptyLabel.hidden = (self.items.count > 0);
@@ -216,9 +222,16 @@ static NSString *SPHumanSize(unsigned long long bytes) {
 #pragma mark 导入
 
 - (void)importFile {
-    UIDocumentPickerViewController *picker =
-        [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.movie", @"public.audio", @"public.data"]
-                                                               inMode:UIDocumentPickerModeImport];
+    UIDocumentPickerViewController *picker = nil;
+#ifdef SP_HAS_UTTYPE
+    picker = [[UIDocumentPickerViewController alloc]
+              initForOpeningContentTypes:@[UTTypeMovie, UTTypeAudio, UTTypeData]
+                                  asCopy:YES];
+#else
+    picker = [[UIDocumentPickerViewController alloc]
+              initWithDocumentTypes:@[@"public.movie", @"public.audio", @"public.data"]
+                             inMode:UIDocumentPickerModeImport];
+#endif
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     [self presentViewController:picker animated:YES completion:nil];
@@ -273,7 +286,7 @@ static NSString *SPHumanSize(unsigned long long bytes) {
     NSDictionary *item = self.items[indexPath.row];
     cell.textLabel.text = item[@"name"];
     cell.textLabel.font = [UIFont systemFontOfSize:15];
-    cell.textLabel.lineBreakMode = NSLineBreakByMiddleTruncation;
+    cell.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"MM-dd HH:mm";
     cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  ·  %@",
